@@ -244,14 +244,19 @@ def test_partial_fill_triggers_immediately_after_protection() -> None:
 
 
 def test_hook_registry_returns_skipped_when_disabled(monkeypatch: Any) -> None:
-    """The hook wrapper short-circuits when exit_advisor.enabled=false."""
-    from bot.config import get_settings
+    """The hook wrapper short-circuits when exit_advisor.enabled=false.
+
+    Constructs a hermetic Settings with the advisor explicitly disabled rather
+    than depending on the operator's on-disk config (which may have the advisor
+    enabled in their session).
+    """
+    from bot.config import ExitAdvisorConfig, get_settings
     from bot.exit_advisor.core.types import AdvisorResponse
     from bot.exit_advisor.hook.registry import notify_event
 
-    settings = get_settings()
-    # Settings should default to enabled=False.
-    assert not settings.exit_advisor.enabled
+    base = get_settings()
+    disabled = base.model_copy(update={"exit_advisor": ExitAdvisorConfig(enabled=False)})
+    assert not disabled.exit_advisor.enabled
     response: AdvisorResponse = notify_event(
         _PositionRecord(),  # type: ignore[arg-type]
         PositionProtected(
@@ -262,5 +267,6 @@ def test_hook_registry_returns_skipped_when_disabled(monkeypatch: Any) -> None:
             initial_scale_out=2.90,
             position_size=200,
         ),
+        settings=disabled,
     )
     assert response.is_skipped

@@ -1518,6 +1518,15 @@ class Settings(BaseSettings):
     # swallowed so the presence of the key is visible in settings dumps.
     config_file: str | None = None
 
+    # Phase 11 LLM advisor — the Anthropic API key is read by
+    # ``bot.exit_advisor.advisor.bootstrap`` directly from ``os.environ``
+    # (after a ``load_dotenv()`` call there). It is declared here as a
+    # typed no-op so the presence of ``ANTHROPIC_API_KEY`` in ``.env``
+    # doesn't trip ``extra="forbid"`` — same pattern as ``config_file``
+    # above. Settings.anthropic_api_key is intentionally never consumed
+    # by the bot; the canonical reader is the bootstrap function.
+    anthropic_api_key: str | None = None
+
     account: AccountConfig = Field(default_factory=AccountConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)

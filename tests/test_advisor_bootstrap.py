@@ -17,6 +17,18 @@ def _clean_registry() -> None:
     unregister_exit_advisor()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub out load_dotenv so the operator's real .env doesn't bleed into tests.
+
+    Without this, ``test_returns_none_when_api_key_missing`` fails as soon as the
+    operator adds a real ANTHROPIC_API_KEY to .env: bootstrap calls load_dotenv()
+    with override=False, which then promotes the real key into os.environ even
+    though the test has explicitly delenv'd it.
+    """
+    monkeypatch.setattr("bot.exit_advisor.advisor.bootstrap.load_dotenv", lambda **_: False)
+
+
 def _settings_with_advisor(*, enabled: bool = True, hook_acts: bool = False) -> Settings:
     """Build a Settings whose exit_advisor block matches the test scenario."""
     raw: dict[str, dict[str, object]] = {

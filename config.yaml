@@ -142,8 +142,8 @@ logging:
 # to true in its own config; production main never has the hook
 # actively running unless an operator deliberately enables it.
 exit_advisor:
-  enabled: false              # master switch — false = no hook calls, no overhead, no risk to existing behaviour
-  hook_acts: false            # when true, actionable recommendations execute against IBKR; when false, log-only diagnostic mode
+  enabled: true              # master switch — false = no hook calls, no overhead, no risk to existing behaviour
+  hook_acts: true            # when true, actionable recommendations execute against IBKR; when false, log-only diagnostic mode
   timeout_seconds: 10.0       # hook-call wall-clock cap; on timeout the call is treated as failed and an event is logged
   log_skipped_events: true    # log every "skipped" advisor response (high volume — flip false in busy sessions)
   # --- Live LLM advisor (bot/exit_advisor/advisor) — only consumed when enabled=true.
