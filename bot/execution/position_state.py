@@ -669,6 +669,15 @@ class PositionStore:
             if exit_type not in valid_types:
                 continue
             # exit_type is a runtime str here; narrow for the Literal by cast-via-match.
+            # Each value of ``valid_types`` above must have an explicit branch here
+            # — the ``else`` is reserved for ``"auto_flatten"`` only. Phase 7.8
+            # ``pre_scale_red_candle`` was added to ``valid_types`` and ``ExitType``
+            # but missed this chain initially, so the fallthrough silently
+            # downgraded it to ``auto_flatten`` (which the risk engine treats as
+            # a session-ending terminal classification, blocking re-entries
+            # post-restart that the live path would have allowed). When adding
+            # a new ``ExitType`` member, update both the frozenset above AND
+            # this chain in lockstep.
             typed_exit: ExitType
             if exit_type == "target_hit":
                 typed_exit = "target_hit"
@@ -676,6 +685,8 @@ class PositionStore:
                 typed_exit = "stop_hit"
             elif exit_type == "scale_out_then_trail":
                 typed_exit = "scale_out_then_trail"
+            elif exit_type == "pre_scale_red_candle":
+                typed_exit = "pre_scale_red_candle"
             elif exit_type == "advisor_exit":
                 typed_exit = "advisor_exit"
             else:

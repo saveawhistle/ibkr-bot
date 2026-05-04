@@ -329,3 +329,51 @@ def test_rebuild_ignores_unknown_exit_type_but_counts_entry() -> None:
     assert aaa.entries_count == 1
     assert aaa.last_exit_type is None
     assert aaa.last_exit_pnl is None
+
+
+def test_rebuild_preserves_pre_scale_red_candle_exit_type() -> None:
+    """Phase 7.8 ``pre_scale_red_candle`` exits must round-trip through journal replay.
+
+    Regression for a latent bug surfaced during Phase 11 review: the
+    if/elif/else narrowing chain in ``rebuild_symbol_histories_from_journal``
+    accepted ``"pre_scale_red_candle"`` past the ``valid_types`` filter (the
+    string is in the frozenset) but had no matching elif branch, so the
+    rebuild silently downgraded it to ``"auto_flatten"`` via the fallthrough
+    ``else``.
+
+    Operational impact of the bug: ``RiskEngine._check_reentry_locked`` is
+    the only consumer of ``last_exit_type`` that classifies an exit as
+    terminal, and it does so *only* for ``"auto_flatten"`` (rejection
+    reason ``auto_flattened_terminal``, "session_ending"). Live exits via
+    ``trade_manager._execute_pre_scale_red_candle_exit`` correctly record
+    ``"pre_scale_red_candle"``, which proceeds through the normal re-entry
+    gates (cooldown, profitable-prior-exit, max-entries-per-symbol). After a
+    crash-restart, the rebuilt history would fabricate an
+    ``"auto_flatten"`` classification and **block all further entries on
+    that symbol for the rest of the session** — silently diverging from the
+    live behavior.
+
+    The fix preserves the exit type verbatim so post-restart re-entry
+    decisions match what would have happened without the crash.
+    """
+    store = PositionStore()
+    rows = [
+        SimpleNamespace(
+            symbol="WLDS",
+            opened_at=_NOW,
+            closed_at=_NOW + timedelta(minutes=4),
+            pnl=-3.50,
+            exit_type="pre_scale_red_candle",
+        ),
+    ]
+    store.rebuild_symbol_histories_from_journal(rows)
+    history = store.symbol_history("WLDS")
+    assert history.entries_count == 1
+    assert history.last_exit_type == "pre_scale_red_candle", (
+        "pre_scale_red_candle must round-trip through rebuild verbatim. "
+        "If this fails as 'auto_flatten', the if/elif chain in "
+        "rebuild_symbol_histories_from_journal is missing a branch and the "
+        "exit is being silently downgraded — see test docstring for impact."
+    )
+    assert history.last_exit_pnl == pytest.approx(-3.50)
+    assert history.last_exit_time == _NOW + timedelta(minutes=4)
