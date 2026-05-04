@@ -116,9 +116,7 @@ def translate_depth_event(raw: Any, symbol: str) -> L2BookUpdate | None:
     )
 
 
-def translate_print_event(
-    raw: Any, symbol: str, book_state: BookState | None
-) -> L2Print | None:
+def translate_print_event(raw: Any, symbol: str, book_state: BookState | None) -> L2Print | None:
     """Convert one raw ``TickByTickAllLast`` (or equivalent) event into
     a canonical :class:`L2Print`. ``aggressor_side`` is derived against
     the supplied ``book_state``; if state is ``None`` or one-sided,
@@ -132,9 +130,7 @@ def translate_print_event(
         return None
     if price <= 0 or size <= 0:
         return None
-    timestamp = _coerce_timestamp(
-        getattr(raw, "time", None) or getattr(raw, "timestamp", None)
-    )
+    timestamp = _coerce_timestamp(getattr(raw, "time", None) or getattr(raw, "timestamp", None))
     aggressor = derive_aggressor_side(price, book_state)
     return L2Print(
         timestamp=timestamp,
@@ -201,12 +197,27 @@ class L2StreamAdapter:
 
     async def start(self) -> None:
         """Subscribe to both streams. Must be called from an async
-        context with a connected IBKR client."""
+        context with a connected IBKR client.
+
+        ``isSmartDepth=True`` is REQUIRED when the qualified contract is
+        SMART-routed (the default produced by ``qualify_stock``). Without
+        it, IBKR returns Error 10092 ("Deep market data is not supported
+        for this combination of security type/exchange") because SMART
+        isn't a real venue with a book — the flag tells IBKR to aggregate
+        depth across the SMART-routed venues for which the account has
+        entitlements (NASDAQ TotalView, IEX DOB, etc.). Discovered on
+        2026-05-04 during a CNSP L2 entitlement probe. If a future code
+        path passes a contract with explicit direct routing (e.g.
+        ``exchange="ISLAND"`` for raw NASDAQ depth), the request goes
+        straight to that venue's book and ``isSmartDepth`` must be
+        ``False`` — branching below handles both cases.
+        """
         if self._started:
             return
         contract = await self.ibkr_client.qualify_stock(self.symbol)
+        is_smart_depth = (getattr(contract, "exchange", "") or "").upper() == "SMART"
         self._depth_ticker = self.ibkr_client.ib.reqMktDepth(
-            contract, numRows=self.num_depth_rows
+            contract, numRows=self.num_depth_rows, isSmartDepth=is_smart_depth
         )
         self._prints_ticker = self.ibkr_client.ib.reqTickByTickData(
             contract, "AllLast", numberOfTicks=0, ignoreSize=False
@@ -214,7 +225,11 @@ class L2StreamAdapter:
         self._depth_ticker.updateEvent += self._on_depth_update
         self._prints_ticker.updateEvent += self._on_prints_update
         self._started = True
-        log.info("L2StreamAdapter started for %s", self.symbol)
+        log.info(
+            "L2StreamAdapter started for %s (isSmartDepth=%s)",
+            self.symbol,
+            is_smart_depth,
+        )
 
     async def stop(self) -> None:
         if not self._started:
