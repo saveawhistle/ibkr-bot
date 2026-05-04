@@ -1,0 +1,53 @@
+# Secrets & local config
+.env
+.env.local
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Runtime artifacts
+logs/*
+!logs/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+
+# Local scratch notes (operator's personal observations + module
+# progress/validation logs — durable history kept locally, not shipped)
+docs/
+
+# Phase 6.8 — paper-trading operator state (manual catalyst overrides, etc.)
+data/
+
+# Exit-advisor — historical bar cache. Operator-populated via:
+#   python scripts/fetch_historical_bars.py --all-trades
+# (Lives under data/ which is already gitignored above; the .gitkeep
+# is whitelisted so the directory survives a fresh clone.)
+!data/historical_bars/
+data/historical_bars/*
+!data/historical_bars/.gitkeep

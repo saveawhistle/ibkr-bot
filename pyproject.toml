@@ -1,0 +1,75 @@
+[project]
+name = "ibkr-bot"
+version = "0.1.0"
+description = "Automated day-trading bot for Interactive Brokers that implements the Gap-and-Go and Momentum strategies."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ib_async>=2",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "structlog>=24",
+    "typer>=0.12",
+    "pyyaml>=6",
+    "httpx>=0.27",
+    "tenacity>=9.0",
+    "python-telegram-bot>=21.0",
+    "yfinance>=0.2.40",
+    "pandas>=2",
+    "sqlalchemy>=2",
+    "aiosqlite>=0.20",
+    "apscheduler>=3.10",
+    "anthropic>=0.40",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+ibkr-bot = "bot.cli:app"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "types-PyYAML>=6",
+    "pandas-stubs>=2",
+    "freezegun>=1.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bot"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "N"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["ib_async.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["anthropic", "anthropic.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: tests that require a running paper TWS on the configured port",
+]
+testpaths = ["tests"]

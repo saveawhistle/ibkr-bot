@@ -1,0 +1,258 @@
+account:
+  mode: paper              # paper | live
+
+risk:
+  # --- Phase 4b (current) ---
+  max_loss_per_trade_usd: 24           # per-trade $ risk (floor(risk_budget / (entry-stop)))
+  max_position_value_usd: 2400        # 3× $5k starting equity; sits under 4:1 margin's $20k ceiling
+  max_daily_loss_usd: 72              # halt new entries on this loss; existing brackets run to their own stops
+  daily_profit_goal_usd: 120           # halt new entries on goal; the "walk away when you hit your number"
+  giveback_trigger_usd: 400            # only arm give-back guard once peak PnL clears this floor
+  giveback_pct: 50                     # if peak >= trigger and current drops to peak * (1 - pct/100), halt
+  max_concurrent_positions: 1          # global across all symbols (the methodology recommends one name at a time)
+  max_trades_per_day: 5                # carried forward from 4a — revenge-trading guard
+  # --- Phase 4c rule-based quality gates ---
+  max_stop_width_usd: 0.50             # the methodology: "If I risk 50 cents or more… I try to avoid that trade"
+  max_pct_of_bar_volume: 2.0           # the methodology scanner rule: order ≪ 2–5% of 1-min volume
+  extension_bar_trigger_multiple: 2.0  # extension dollar threshold = max_loss × this (the "$200–$400 spike")
+  # --- Phase 4d multiple pullback re-entries ---
+  re_entry:
+    enabled: true                      # master switch; set false to revert to strict one-entry-per-symbol
+    max_entries_per_symbol: 3          # the methodology: first + second aggressively, third cautious; hard cap at 3
+    size_multipliers: [1.0, 1.0, 0.5]  # max_loss × multiplier[entries_count]; 3rd entry halved
+    cooldown_seconds: 120              # refuse the next entry until this many sec after last exit (~2 bars)
+    require_profitable_prior_exit: true # no revenge trades — last exit must have PnL > 0 to re-enter
+  # --- Phase 4g automatic rehab tier (the methodology: "when you're in a drawdown, trade smaller") ---
+  rehab:
+    enabled: true                                       # master switch; set false to always use base caps
+    rehab_consecutive_red_days: 2                       # 2 back-to-back reds → REHAB
+    rehab_lookback_days: 10                             # drawdown window (trading days looked back in journal)
+    rehab_drawdown_multiple_of_daily_loss: 3.0          # cumulative drawdown ≥ 3 × max_daily_loss → REHAB
+    rehab_max_loss_multiplier: 0.5                      # per-trade $ risk halved in REHAB
+    rehab_max_daily_loss_multiplier: 0.5                # daily loss cap halved in REHAB
+    rehab_max_trades_per_day: 3                         # fewer swings while recalibrating
+    deep_rehab_consecutive_red_days: 4                  # 4 back-to-back reds → DEEP_REHAB
+    deep_rehab_drawdown_multiple_of_daily_loss: 5.0     # cumulative drawdown ≥ 5 × max_daily_loss → DEEP_REHAB
+    deep_rehab_max_loss_multiplier: 0.25                # per-trade $ risk quartered in DEEP_REHAB
+    deep_rehab_max_daily_loss_multiplier: 0.25          # daily loss cap quartered in DEEP_REHAB
+    deep_rehab_max_trades_per_day: 1                    # the "trade one setup a day" during a slump
+    recovery_drawdown_recovered_fraction: 0.50          # earn back this fraction of drawdown to exit tier
+  # --- Migration notes (Phase 4a → 4b) ---
+  # position_risk_usd → max_loss_per_trade_usd (same intent, clearer name; config.py raises if the old key is set)
+  # per_trade_pct, daily_loss_pct, max_positions → removed; replaced by $-based equivalents above
+
+execution:
+  rth_only: true              # RTH-only fills — premarket slippage is brutal
+  require_paper_mode: true    # hard paper gate; Phase 4b flips this after risk gates land
+  # --- Phase 4i exit discipline ---
+  scale_out_multiple: 2.0     # scale-out fires at entry + N × initial_risk; the 2:1 R:R rule
+  runner_target_enabled: false # the methodology doesn't place hard profit ceilings on the runner half
+  runner_target_multiple: 3.0 # only consumed when runner_target_enabled=true (bracket LMT)
+  # --- Phase 4h / 6.14 post-scale-out stop shape ---
+  post_scaleout_stop_mode: "immediate_trail"  # "static_breakeven" | "adjustable_to_trail" | "immediate_trail" (Phase 6.14 default — IBKR TRAIL planted at scale-out, locks in ≥1R profit immediately)
+  trail_activation_r_multiple: 1.0            # only consumed by adjustable_to_trail: conversion trigger at scale_out + this×R
+  trail_amount_r_multiple: 1.0                # trail distance in R-multiples; applies to both adjustable_to_trail and immediate_trail
+  # --- Phase 4j BUY STP-LMT entry orders (tick-level trigger on the breakout level) ---
+  entry_order_type: "LMT"        # enum: "LMT" | "STP_LMT" | "MKT"; LMT = Phase 8.2 default — marketable limit at signal.entry + buffer (capped slippage); STP_LMT = server-side tick trigger; MKT = Phase 6.12 the manual hotkey (uncapped slippage)
+  entry_limit_buffer_usd: 0.10       # LMT ceiling above STP trigger (STP_LMT path only); ignored on MKT and LMT paths
+  # Phase 8.2 — LMT entry buffer (only consumed by entry_order_type="LMT").
+  # Buffer = entry_price × pct/100, clamped to [floor_usd, cap_usd].
+  # Floor keeps buffer above bid-ask spread on penny stocks; cap prevents
+  # catastrophic slippage on halt reopens / fast spikes at higher prices.
+  lmt_buffer_pct: 2.0
+  lmt_buffer_usd_floor: 0.15
+  lmt_buffer_usd_cap: 0.50
+  # Phase 10.6 — percentage ceiling on the LMT buffer to keep the parent
+  # below IBKR's ~9.8% aggressive-LMT cap on low-priced stocks. Caps
+  # buffer at entry × max_pct/100 (default 7%, ~2.8 percentage points
+  # below the IBKR threshold). Symmetric to Phase 10.2 stop-distance
+  # floor: floor widens too-tight stops, ceiling narrows too-aggressive
+  # entry buffers. Without this, the floor produces 13% LMT buffers on
+  # $1 stocks — see SHPH 2026-05-01 13:53:50 UTC Error 202 incident.
+  lmt_buffer_max_pct: 7.0
+  # Phase 7.8 — the "first red candle close" pre-scale exit.
+  # Disabled 2026-04-24 after WLDS doji false-fire (close $0.003 below prior close
+  # triggered the exit). Semantics need rethink — options under discussion:
+  # prior-low reference, minimum delta threshold, or leave off. Code default is
+  # True; runtime override below keeps the code path intact while paper review
+  # continues.
+  pre_scale_red_candle_exit_enabled: false
+
+session:
+  timezone: America/New_York
+  premarket_scan_start: "07:00"
+  trading_start: "09:30"
+  trading_end: "11:30"
+  flatten_all: "15:55"
+  loop_operation_timeout_seconds: 10.0  # timeout per IBKR operation in orchestrator loop; stall retries on next iteration
+  watchlist_rescan_interval_seconds: 300  # rescan scanner every N seconds to pick up new gappers mid-session
+  watchlist_max_size: 10                   # hard cap on subscribed watchlist size; oldest non-position symbol drops on new arrival
+  bar_staleness_threshold_seconds: 180     # skip strategy evaluation if latest bar older than this (halt detection)
+
+universe:
+  price_min: 1.0
+  price_max: 20.0
+  float_max: 20_000_000
+  gap_pct_min: 4.0
+  rvol_min: 5.0
+  premarket_vol_min: 300_000
+
+strategies:
+  log_extension_check_passes: false      # Phase 6.6: emit strategy.extension_check_passed on every passing bar (calibration sweeps only — floods JSONL otherwise)
+  # Phase 8.4 — cap scale-out at premarket high − $0.01 when entry sits
+  # below PMH. Locks in profit just below well-known intraday resistance
+  # rather than trying to push through it. Disabled effectively when the
+  # gapper has already cleared PMH (entry > PMH).
+  premarket_high_cap_enabled: true
+  gap_and_go:
+    enabled: true
+    # Phase 8.1: rr_min removed — R:R is pinned to execution.scale_out_multiple
+    # by construction (scale_out = entry + N × initial_risk); the old floor
+    # check was tautological.
+    vwap_extension_grace_minutes: 15     # bypass extended_from_vwap rejection during first N minutes after session open (0 disables)
+    extended_from_vwap_atr_multiple: 20.0 # Phase 6.6: raised from 3.0 — Day 2 BATL precedent + Day 3 paper trading rejected normal continuation setups
+    window_end: "10:00"                  # Phase 6.7: evaluate bars only before this HH:MM (NY-local). Widen for off-hours testing (e.g. "16:00"). Start is always 09:30 ET.
+  momentum:
+    enabled: true
+    flag_max_pullback_pct: 5.0
+    extended_from_vwap_atr_multiple: 20.0 # Phase 6.6: raised from 3.0 — 10 rejections (ELPW/TORO/ZENA/BTM/ENVB) on Day 3 against normal continuation
+    window_end: "16:00"                  # Phase 6.7: evaluate bars only before this HH:MM (NY-local). Widen for off-hours testing (e.g. "16:00"). Start is always 09:30 ET.
+
+ibkr:
+  host: 127.0.0.1
+  port: 7497               # 7497 TWS paper, 7496 TWS live, 4002 GW paper, 4001 GW live
+  client_id: 17
+
+# --- Phase 5.1 news window + logging ---
+# Override by setting BOT_DATA_SOURCES__NEWS_LOOKBACK_HOURS / BOT_LOGGING__PATH etc.
+data_sources:
+  news_lookback_hours: 96              # 4-day Finnhub fetch window — catches Friday PM → Sunday news for Monday scans
+  news_max_age_hours_for_classify: 72  # classifier rejects items older than 3 days so stale keywords don't misattribute today's move
+
+logging:
+  level: INFO                          # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  json: true                           # JSONRenderer to stdout + file; false falls back to the dev ConsoleRenderer
+  path: "logs/"                        # session files land at {path}/session_{YYYY-MM-DD}.jsonl in NY date; null disables file logging
+
+# --- Phase 11 exit advisor hook (DISABLED ON PRODUCTION MAIN) ---
+# The hook is the integration point for external advisor implementations
+# (initially the spike branch's exit advisor). With ``enabled: false``,
+# every notify call short-circuits and the bot's behaviour is identical
+# to pre-Phase-11. The spike branch flips ``enabled`` AND ``hook_acts``
+# to true in its own config; production main never has the hook
+# actively running unless an operator deliberately enables it.
+exit_advisor:
+  enabled: false              # master switch — false = no hook calls, no overhead, no risk to existing behaviour
+  hook_acts: false            # when true, actionable recommendations execute against IBKR; when false, log-only diagnostic mode
+  timeout_seconds: 10.0       # hook-call wall-clock cap; on timeout the call is treated as failed and an event is logged
+  log_skipped_events: true    # log every "skipped" advisor response (high volume — flip false in busy sessions)
+  # --- Live LLM advisor (bot/exit_advisor/advisor) — only consumed when enabled=true.
+  # ANTHROPIC_API_KEY is read from the environment at bootstrap; never put it here.
+  llm_model: "claude-sonnet-4-6"          # pinned model; bump deliberately when validating a new release
+  llm_max_tokens: 1024                     # output cap; tool-use response + reasoning fits comfortably under this
+  llm_timeout_seconds: 8.0                 # LLM-side timeout; the outer hook timeout (10s) is the safety net
+  cost_soft_cap_usd: 10.0                  # one-time Telegram warning at this cumulative session spend
+  cost_hard_cap_usd: 50.0                  # advisor stops calling the LLM and returns deterministic 'hold' past this
+  event_buffer_time_floor_seconds: 30.0    # bar/MA-cross events trigger only after this many seconds since last LLM call
+  event_buffer_hard_floor_seconds: 10.0    # absolute minimum gap between LLM calls (caps even always-trigger events)
+  self_disable_failure_rate: 0.5           # advisor disables itself for the session at >50% LLM failure rate
+  self_disable_min_calls: 5                # need at least this many calls before failure rate is meaningful
+
+# --- Spike (exit-advisor): event taxonomy consumed by the trade-replay harness ---
+# Layers 1+2 ship time / pnl / order_state / price_levels / moving_averages /
+# volume / bar_shape. Deferred classes (market_context / news / halts / l2)
+# are placeholders; enabling one will fail validation until its layer lands.
+exit_events:
+  price_levels:
+    enabled: true               # LAYER 2
+    hod_lod: true
+    prior_day_high_low: true
+    prior_day_close: true
+    premarket_high_low: false   # not yet implemented
+    round_numbers: false        # not yet implemented
+    gap_fill: true
+    gap_threshold_pct: 0.01
+  moving_averages:
+    enabled: true               # LAYER 2
+    vwap: true
+    ema_9: true
+    sma_200: false              # not yet implemented
+  volume:
+    enabled: true               # LAYER 2
+    spike_threshold_x_avg: 2.0
+    dryup_threshold_x_avg: 0.4
+    rvol_milestones: [1.0, 2.0, 5.0]
+    baseline_window_bars: 20
+    rvol_lookback_days: 10
+  bar_shape:
+    enabled: true               # LAYER 2
+    shapes: [doji, hammer, shooting_star, engulfing, inside_bar, outside_bar]
+    wick_threshold_pct: 0.6
+    consecutive_bars_threshold: 3
+  time:
+    enabled: true               # LAYER 1
+    milestones_minutes_after_open: [5, 30, 120]
+    time_in_trade_milestones: [2, 5, 10, 30]
+  pnl:
+    enabled: true               # LAYER 1
+    r_multiples: [0.5, 1.0, 1.5, 2.0, 3.0]
+    drawdown_pct_from_peak: [0.25, 0.5]
+    track_mfe: true
+  order_state:
+    enabled: true               # LAYER 1
+    partial_fills: true
+    order_rejections: true
+  market_context:
+    enabled: false              # later layer (requires bot infra)
+    leaderboard: false
+    broad_market: false
+    peers: false
+  news:
+    enabled: false              # later layer
+  halts:
+    enabled: false              # later layer
+  l2:
+    enabled: true               # LAYER L2-A — NASDAQ TotalView entitled
+    bid_offer_pulls:
+      enabled: true
+      lookback_ms: 100
+    absorption:
+      enabled: true
+      refresh_multiplier: 3.0
+    spread_events:
+      enabled: true
+      widening_ratio: 2.0
+      tightening_ratio: 0.5
+      rolling_window_events: 20
+    imbalance:
+      enabled: true
+      threshold_ratio: 3.0
+      levels_to_sum: 5
+    print_clusters:
+      enabled: true
+      window_seconds: 10.0
+      min_prints: 5
+    large_prints:
+      enabled: true
+      size_multiplier: 5.0
+      rolling_window_prints: 50
+
+# --- Spike (exit-advisor, layer 3): risk gate framework ---
+# Hard guardrails (StopProtection, NoReentry, ProtectedPosition,
+# NakedPosition, MaxHoldTime) are not toggleable; only their parameters
+# and the soft gates' tunables live here. Set enabled=false to bypass
+# the entire layer (MaxHoldTimePolicy + gate chain) — testing/ablation only.
+exit_gates:
+  enabled: true
+  max_hold_minutes: 60
+  confidence_threshold: 0.7
+  drawdown_acceleration_pct: 0.5
+  drawdown_reduced_confidence_threshold: 0.5
+  recency_throttle_seconds: 30
+  min_r_for_partial: 1.0
+  min_r_for_stop_tighten: 0.5
+
+# --- Phase 6.8 / 6.13 test / debug hooks (PAPER TRADING ONLY) ---
+testing:
+  allow_catalyst_overrides: true       # Phase 6.8: enables `bot inject-catalyst` CLI + scanner-side override application. MUST be false in live configs — toggling this off instantly disables both sides regardless of on-disk state.
+  allow_force_entry: true              # Phase 6.13: enables `bot force-entry` paper-testing CLI. Double-gated (also requires account.mode==paper). MUST be false in live configs.
