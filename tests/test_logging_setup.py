@@ -54,8 +54,16 @@ def test_configure_logging_stdout_only_when_path_is_none() -> None:
     assert file_handlers == []
 
 
-def test_configure_logging_attaches_file_handler(tmp_path: Path) -> None:
-    """When ``logging.path`` is set, a FileHandler writes to the expected filename."""
+def test_configure_logging_attaches_file_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``logging.path`` is set, a FileHandler writes to the expected filename.
+
+    ``configure_logging`` suppresses the FileHandler when running under pytest
+    (see ``_running_under_pytest``). To exercise the production path the test
+    must clear ``PYTEST_CURRENT_TEST`` before calling.
+    """
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     configure_logging(_make_settings(path=tmp_path))
     root = logging.getLogger()
     file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
@@ -65,16 +73,20 @@ def test_configure_logging_attaches_file_handler(tmp_path: Path) -> None:
     assert Path(file_handlers[0].baseFilename) == expected.resolve()
 
 
-def test_configure_logging_creates_missing_directory(tmp_path: Path) -> None:
-    """``logging.path`` that doesn't exist yet is created on configure."""
+def test_configure_logging_creates_missing_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``logging.path`` that doesn't exist yet is created on configure (production path)."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     target = tmp_path / "deep" / "nested" / "logs"
     assert not target.exists()
     configure_logging(_make_settings(path=target))
     assert target.exists()
 
 
-def test_configure_logging_is_idempotent(tmp_path: Path) -> None:
+def test_configure_logging_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Re-calling ``configure_logging`` is a no-op; no duplicate handlers."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     settings = _make_settings(path=tmp_path)
     configure_logging(settings)
     first_count = len(logging.getLogger().handlers)
@@ -83,8 +95,11 @@ def test_configure_logging_is_idempotent(tmp_path: Path) -> None:
     assert first_count == second_count
 
 
-def test_configure_logging_writes_json_lines_to_file(tmp_path: Path) -> None:
+def test_configure_logging_writes_json_lines_to_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An emitted log entry lands in the session JSONL file as one JSON object."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     settings = _make_settings(path=tmp_path)
     configure_logging(settings)
 
@@ -100,6 +115,52 @@ def test_configure_logging_writes_json_lines_to_file(tmp_path: Path) -> None:
     parsed = [json.loads(line) for line in content]
     events = [row.get("event") for row in parsed]
     assert "phase5_1.smoke" in events
+
+
+def test_configure_logging_skips_file_handler_under_pytest(tmp_path: Path) -> None:
+    """Under pytest, the FileHandler is suppressed even when ``logging.path`` is set.
+
+    Without this guard, every ``pytest`` run would append hundreds of test-fixture
+    events to the operator's production session JSONL — exactly what we observed
+    on 2026-05-04 with the ``_RecordingAdvisor`` / ``_RaisingAdvisor`` /
+    ``_SlowAdvisor`` / ``_BareNoneAdvisor`` lines drowning real session activity.
+    """
+    # PYTEST_CURRENT_TEST is set by the pytest harness for the duration of this test;
+    # we don't need to set it explicitly. Just sanity-check it's there and proceed.
+    import os as _os
+
+    assert _os.environ.get("PYTEST_CURRENT_TEST"), "PYTEST_CURRENT_TEST must be set under pytest"
+
+    configure_logging(_make_settings(path=tmp_path))
+    root = logging.getLogger()
+    file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+    assert file_handlers == [], (
+        "FileHandler must not attach under pytest — production session log "
+        "should never see test-fixture events. Got: " + repr(file_handlers)
+    )
+    # Verify the file was not even created.
+    expected = resolve_session_log_path(_make_settings(path=tmp_path))
+    assert expected is not None
+    assert not expected.exists(), (
+        f"session log file {expected} was created under pytest — the gate didn't fire"
+    )
+
+
+def test_configure_logging_attaches_file_handler_when_pytest_var_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production path (no ``PYTEST_CURRENT_TEST``) wires the FileHandler.
+
+    Symmetric counterpart to ``test_configure_logging_skips_file_handler_under_pytest``
+    so both branches of the gate are exercised explicitly.
+    """
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    configure_logging(_make_settings(path=tmp_path))
+    root = logging.getLogger()
+    file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+    assert len(file_handlers) == 1, (
+        "FileHandler must attach when not running under pytest. Got: " + repr(file_handlers)
+    )
 
 
 def test_resolve_session_log_path_returns_none_when_path_unset() -> None:

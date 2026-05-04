@@ -257,10 +257,25 @@ class MarketData:
            default path's backfill, but without subscribing for live
            updates from this stream.
         2. **Live updates** via ``reqRealTimeBars(contract, 5, "TRADES",
-           useRTH=True)`` + a per-symbol :class:`RollingMinuteAggregator`.
+           useRTH=False)`` + a per-symbol :class:`RollingMinuteAggregator`.
            Each finalized 1-min candle the aggregator emits is appended
            to ``BarStream.bars`` and triggers the same ``on_new_bar``
            callback the default path uses.
+
+        ``useRTH=False`` on the live stream is deliberate. With
+        ``useRTH=True`` (the original Phase 10.4 wiring) IBKR doesn't
+        deliver any 5-sec bars until 09:30 ET, which produces a silent
+        gap for any symbol whose watchlist subscription begins during
+        premarket: the backfill covers premarket up to subscribe time,
+        then nothing until RTH open. Monday 2026-05-04's CNSP added at
+        09:05 ET silently went 25 minutes without bars (logged as
+        ``market_data.bar_gap_detected`` at the 09:30 boundary, then
+        ``strategy.bar_stale`` skipped the open-bar evaluation). With
+        ``useRTH=False`` the live stream covers premarket too, so the
+        backfill→live seam is contiguous regardless of subscribe
+        time. The default ``subscribe_bars`` path's
+        ``keepUpToDate=True`` historical stream already behaves this
+        way; this brings the aggregator path to parity.
 
         ``BarStream._bar_list`` is set to the ``RealTimeBarList`` (not
         the historical backfill list) so callers that hook
@@ -312,10 +327,10 @@ class MarketData:
         # dataclass wrapper.
         finalized_rows: list[dict[str, Any]] = []
 
-        # Stage 2: live 5-sec real-time bars.
-        rt_bars = self._ibkr.ib.reqRealTimeBars(
-            contract, 5, "TRADES", useRTH=True
-        )
+        # Stage 2: live 5-sec real-time bars. ``useRTH=False`` so the
+        # stream covers premarket too — see the docstring's note on the
+        # 2026-05-04 CNSP 25-minute silent gap that motivated this.
+        rt_bars = self._ibkr.ib.reqRealTimeBars(contract, 5, "TRADES", useRTH=False)
         req_id = ref_req_id(rt_bars)
 
         # Forward-declare so the aggregator's callback can reference the
