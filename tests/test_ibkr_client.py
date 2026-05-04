@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from _ibkr_test_helpers import make_test_client_id
 
 from bot.brokerage.ibkr_client import (
     ActiveSubscription,
@@ -69,11 +70,17 @@ async def test_ping_paper_account() -> None:
     Requires:
       * TWS (or IB Gateway) running locally with the API enabled.
       * Logged into the IBKR **paper** account.
-      * Socket listening on the host/port/client-id from ``config.yaml`` (defaults to
-        127.0.0.1:7497, client_id 17).
+      * Socket listening on the host/port from ``config.yaml`` (defaults to
+        127.0.0.1:7497).
+      * TWS API settings configured to accept client IDs up to at least
+        999 (or Master Client ID = 0). See ``tests/_ibkr_test_helpers.py``
+        for the rationale behind the PID-derived test client_id.
 
-    The test auto-skips if the configured socket is closed so CI and dev machines
-    without TWS can still run ``pytest`` cleanly.
+    The test auto-skips if the configured socket is closed so CI and dev
+    machines without TWS can still run ``pytest`` cleanly. Stale-slot
+    collisions (Error 326) used to make the test flaky after an
+    ungraceful disconnect from a prior session; the PID-derived
+    ``client_id`` eliminates that class.
     """
     from bot.config import get_settings
 
@@ -84,7 +91,17 @@ async def test_ping_paper_account() -> None:
             "start TWS with the API enabled to run this test."
         )
 
-    client = IBKRClient(settings=settings)
+    # Override the production client_id with a PID-derived value so
+    # back-to-back test runs don't collide on a slot still held by a
+    # lingering prior connection. Production uses settings.ibkr.client_id
+    # unchanged — only this test path swaps it.
+    test_settings = settings.model_copy(
+        update={
+            "ibkr": settings.ibkr.model_copy(update={"client_id": make_test_client_id()}),
+        }
+    )
+
+    client = IBKRClient(settings=test_settings)
     await client.connect()
     try:
         assert client.is_connected()

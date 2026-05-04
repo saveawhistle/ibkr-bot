@@ -257,6 +257,8 @@ uv run pytest -m integration   # run only the integration tests (requires paper 
 
 Strict mypy is enabled (`disallow_untyped_defs`, `warn_return_any`). The test suite has ~80 files spanning risk, execution, scanner, strategies, all exit-advisor detector layers (heavy L2 coverage), and infrastructure (config, CLI, orchestrator, signal bus, journal, market data).
 
+**TWS configuration for integration tests.** The integration test (`test_ping_paper_account`) connects to TWS using a PID-derived `client_id` in `[100, 999]` so back-to-back runs don't collide on a slot still held by a recently-disconnected prior connection (Error 326). Configure TWS to accept that range via Global Config → API → Settings → Master API client ID = `0` (permits any client ID) or widen the allowed range to `>= 999`. Production trading is unaffected — it uses the operator-configured `client_id` from [config.yaml](config.yaml) (typically `17`).
+
 ## ⚠️ Disclaimer
 
 This is a coding project. Automated day trading is extremely risky and most day traders lose money — the published methodology says so in every post. The bot encodes a strategy; it does not guarantee the strategy works for you, in the current market regime, or at all. Paper trade extensively, start live with tiny size, and never risk money you can't afford to lose. This is not financial advice.
