@@ -20,6 +20,7 @@ handlers on restart-in-the-same-process cases (mainly tests).
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,20 @@ import structlog
 from bot.config import Settings, get_settings
 
 _LOG_CONFIGURED = False
+
+# Pytest sets ``PYTEST_CURRENT_TEST`` for the duration of every test
+# invocation. Detection is reliable across pytest versions and avoids
+# importing pytest from production code. When running under pytest the
+# JSONL file handler is suppressed so test runs don't pollute the
+# operator's session log — historically a session_<date>.jsonl held
+# hundreds of mock-advisor register/unregister entries from the test
+# suite, drowning real production events during forensic review.
+_PYTEST_ENV_VAR = "PYTEST_CURRENT_TEST"
+
+
+def _running_under_pytest() -> bool:
+    """True when ``configure_logging`` is invoked from inside a pytest session."""
+    return _PYTEST_ENV_VAR in os.environ
 
 
 def configure_logging(settings: Settings | None = None) -> None:
@@ -55,7 +70,7 @@ def configure_logging(settings: Settings | None = None) -> None:
     stdout_handler.setFormatter(plain_formatter)
     root.addHandler(stdout_handler)
 
-    if cfg.path is not None:
+    if cfg.path is not None and not _running_under_pytest():
         path = Path(cfg.path)
         path.mkdir(parents=True, exist_ok=True)
         log_file = path / _session_log_filename(resolved)

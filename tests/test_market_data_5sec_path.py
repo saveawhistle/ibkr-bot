@@ -157,7 +157,14 @@ async def test_backfill_call_uses_keep_up_to_date_false() -> None:
 
 @pytest.mark.asyncio
 async def test_subscribes_5sec_realtime_bars() -> None:
-    """``reqRealTimeBars`` is called with bar size 5 and ``useRTH=True``."""
+    """``reqRealTimeBars`` is called with bar size 5 and ``useRTH=False``.
+
+    ``useRTH=False`` is required so the live 5-sec stream delivers premarket
+    bars when a watchlist symbol's subscription begins before 09:30 ET. The
+    original Phase 10.4 wiring used ``useRTH=True``, which produced a silent
+    gap from subscribe time to RTH open — see the 2026-05-04 CNSP 25-min
+    silent gap incident referenced in ``subscribe_bars_5sec_aggregated``.
+    """
     ibkr = _mock_ibkr()
     _setup_subscriptions(ibkr)
     md = MarketData(ibkr=ibkr)
@@ -167,7 +174,10 @@ async def test_subscribes_5sec_realtime_bars() -> None:
     # Positional args: (contract, barSize, whatToShow), useRTH as kwarg.
     assert args[1] == 5
     assert args[2] == "TRADES"
-    assert kwargs["useRTH"] is True
+    assert kwargs["useRTH"] is False, (
+        "useRTH must be False on the live 5-sec stream so premarket bars "
+        "flow continuously — the backfill→live seam relies on it."
+    )
 
 
 @pytest.mark.asyncio
@@ -343,9 +353,7 @@ async def test_emits_bar_received_event_with_aggregated_source() -> None:
         for sec in range(0, 60, 5):
             _emit_5sec_bar(
                 rt_bars,
-                _make_5sec_bar(
-                    datetime(2026, 4, 30, 9, 31, sec, tzinfo=UTC), close=100.0
-                ),
+                _make_5sec_bar(datetime(2026, 4, 30, 9, 31, sec, tzinfo=UTC), close=100.0),
             )
 
     received = [e for e in captured if e["event"] == "market_data.bar_received"]
@@ -462,17 +470,15 @@ async def test_gap_detection_logs_when_aggregator_skips_a_minute() -> None:
         # arrives if minute 32 was started; here we go straight from
         # the synthetic placeholder for 32 to the first 33 bar.
         for sec in range(0, 60, 5):
-            _emit_5sec_bar(
-                rt_bars, _make_5sec_bar(datetime(2026, 4, 30, 9, 33, sec, tzinfo=UTC))
-            )
+            _emit_5sec_bar(rt_bars, _make_5sec_bar(datetime(2026, 4, 30, 9, 33, sec, tzinfo=UTC)))
 
     # Either market_data.bar_gap_detected fires (1-minute jump) or both —
     # we just assert that the bar_received for minute 33 was emitted with
     # a missing-minute gap from minute 31.
     bar_received = [e for e in captured if e["event"] == "market_data.bar_received"]
-    assert any(
-        pd.Timestamp(e["bar_time"]).minute == 33 for e in bar_received
-    ), "expected finalization for minute 33"
+    assert any(pd.Timestamp(e["bar_time"]).minute == 33 for e in bar_received), (
+        "expected finalization for minute 33"
+    )
 
 
 def test_minute_floor_helper_drops_seconds() -> None:
