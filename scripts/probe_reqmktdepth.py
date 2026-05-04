@@ -94,9 +94,7 @@ class ProbeCapture:
             self.print_raw_samples.append(snapshot)
 
     @staticmethod
-    def _snapshot_object(
-        obj: Any, observations: dict[str, FieldObservation]
-    ) -> dict[str, Any]:
+    def _snapshot_object(obj: Any, observations: dict[str, FieldObservation]) -> dict[str, Any]:
         """Return a JSON-serializable snapshot of ``obj``'s public fields,
         and mutate ``observations`` to record each field's type + first
         sample value. Tolerates non-serializable values by stringifying."""
@@ -160,7 +158,13 @@ async def _run_probe(symbol: str, duration: int, num_rows: int) -> ProbeCapture:
         contract = await client.qualify_stock(symbol)
         log.info("qualified %s (conId=%s)", symbol, getattr(contract, "conId", "?"))
 
-        depth_ticker = client.ib.reqMktDepth(contract, numRows=num_rows)
+        # isSmartDepth=True is REQUIRED when contract.exchange == "SMART".
+        # Without it IBKR rejects with Error 10092 ("Deep market data is not
+        # supported for this combination of security type/exchange") because
+        # SMART isn't a real venue with a book — the flag tells IBKR to
+        # aggregate depth across the SMART-routed venues for which the
+        # account has entitlements (NASDAQ TotalView, IEX DOB, etc.).
+        depth_ticker = client.ib.reqMktDepth(contract, numRows=num_rows, isSmartDepth=True)
         prints_ticker = client.ib.reqTickByTickData(
             contract, "AllLast", numberOfTicks=0, ignoreSize=False
         )
@@ -222,9 +226,9 @@ def _print_field_table(observations: dict[str, FieldObservation]) -> None:
         print("  (no fields observed)")
         return
     name_width = max(len(name) for name in observations)
-    type_width = max(
-        len(", ".join(sorted(o.types))) for o in observations.values()
-    ) if observations else 0
+    type_width = (
+        max(len(", ".join(sorted(o.types))) for o in observations.values()) if observations else 0
+    )
     type_width = max(type_width, len("type(s)"))
     print(f"  {'field'.ljust(name_width)}  {'type(s)'.ljust(type_width)}  sample")
     print(f"  {'-' * name_width}  {'-' * type_width}  ------")
@@ -266,17 +270,11 @@ def report(capture: ProbeCapture, symbol: str, duration: int) -> None:
 
     _print_section(
         f"FIRST {SAMPLE_RAW_EVENTS} RAW DEPTH EVENTS",
-        [
-            json.dumps(s, indent=2, default=str)
-            for s in capture.depth_raw_samples
-        ],
+        [json.dumps(s, indent=2, default=str) for s in capture.depth_raw_samples],
     )
     _print_section(
         f"FIRST {SAMPLE_RAW_EVENTS} RAW PRINT EVENTS",
-        [
-            json.dumps(s, indent=2, default=str)
-            for s in capture.print_raw_samples
-        ],
+        [json.dumps(s, indent=2, default=str) for s in capture.print_raw_samples],
     )
 
 
@@ -316,9 +314,7 @@ def main(argv: list[str] | None = None) -> int:
             loop.add_signal_handler(signal.SIGINT, _on_sigint)
 
     try:
-        capture = loop.run_until_complete(
-            _run_probe(args.symbol, args.duration, args.num_rows)
-        )
+        capture = loop.run_until_complete(_run_probe(args.symbol, args.duration, args.num_rows))
     except KeyboardInterrupt:
         print("\ninterrupted — partial capture follows", file=sys.stderr)
         return 1
