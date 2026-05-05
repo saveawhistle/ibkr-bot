@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import MagicMock
 
 import anthropic
 import pytest
@@ -215,3 +216,133 @@ def test_build_recommendation_rejects_non_dict() -> None:
 def test_constructor_rejects_empty_api_key() -> None:
     with pytest.raises(ValueError, match="api_key"):
         AnthropicLLMClient(api_key="")
+
+
+def test_constructor_rejects_negative_max_retries() -> None:
+    """``max_retries`` must be >= 0 — negative would be meaningless and the SDK rejects it."""
+    with pytest.raises(ValueError, match="max_retries"):
+        AnthropicLLMClient(api_key="sk-test", max_retries=-1)
+
+
+# ---- SDK constructor kwargs (regression for 2026-05-05 CLRB self-disable) ----
+#
+# Existing tests in this file inject a fake ``client`` via the ``client=``
+# kwarg, which short-circuits the ``anthropic.Anthropic(...)`` constructor
+# call entirely. As a result, the kwargs passed to the SDK constructor were
+# previously untested — the wrapper could ship any ``max_retries`` value (or
+# none at all) without a single test failing. The two tests below close that
+# coverage gap.
+
+
+def test_constructor_passes_max_retries_zero_to_anthropic_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wrapper MUST pass ``max_retries=0`` to ``anthropic.Anthropic``.
+
+    With the SDK default ``max_retries=2``, the configured ``timeout_seconds``
+    becomes effectively 3x as long in worst case. That misled the
+    self-disable threshold during the 2026-05-05 CLRB session: 8s configured,
+    ~25s actual on three consecutive failures. ``max_retries=0`` keeps the
+    timeout truthful.
+    """
+    captured_kwargs: dict[str, Any] = {}
+
+    def _fake_anthropic(**kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return MagicMock(name="FakeAnthropic")
+
+    import bot.exit_advisor.advisor.llm_client as llm_client_module
+
+    monkeypatch.setattr(llm_client_module.anthropic, "Anthropic", _fake_anthropic)
+
+    AnthropicLLMClient(api_key="sk-test")
+
+    assert captured_kwargs.get("api_key") == "sk-test"
+    assert captured_kwargs.get("max_retries") == 0, (
+        "Wrapper must pass max_retries=0 so the configured timeout is the truthful "
+        "upper bound on wait time. SDK default of 2 multiplies the timeout by up "
+        "to 3x — see DEFAULT_MAX_RETRIES comment in llm_client.py."
+    )
+
+
+def test_constructor_max_retries_is_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit non-default ``max_retries`` flows through to the SDK constructor.
+
+    Belt-and-suspenders pin so a future caller that wants retry behavior (e.g. a
+    long-running backfill harness, not the live advisor) can still opt in
+    without the wrapper silently clamping to zero.
+    """
+    captured_kwargs: dict[str, Any] = {}
+
+    def _fake_anthropic(**kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return MagicMock(name="FakeAnthropic")
+
+    import bot.exit_advisor.advisor.llm_client as llm_client_module
+
+    monkeypatch.setattr(llm_client_module.anthropic, "Anthropic", _fake_anthropic)
+
+    AnthropicLLMClient(api_key="sk-test", max_retries=5)
+
+    assert captured_kwargs.get("max_retries") == 5
+
+
+def test_timeout_not_multiplied_by_sdk_retries() -> None:
+    """A single timeout from the SDK returns failure once — no SDK-level retry loop.
+
+    Companion to ``test_constructor_passes_max_retries_zero_to_anthropic_sdk``:
+    that one pins the kwarg, this one confirms the runtime contract — when the
+    underlying call raises ``APITimeoutError``, the wrapper returns
+    ``LLMCallResult(success=False, failure_reason='llm_timeout')`` immediately
+    without invoking ``messages.create`` a second time. Together they establish
+    that 12s configured = 12s actual, not 3x.
+    """
+    timeout_exc = anthropic.APITimeoutError(request=None)  # type: ignore[arg-type]
+    client, fake = _client_with(raise_exc=timeout_exc)
+
+    # Tracking-side counter on the existing _FakeMessages.create — the fake's
+    # implementation always raises if ``_raise`` is set, so a retry loop would
+    # call .create twice. We assert it was called exactly once.
+    call_count = 0
+    original_create = fake.create
+
+    def _counting_create(**kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        return original_create(**kwargs)
+
+    fake.create = _counting_create  # type: ignore[method-assign]
+
+    result = client.call(EXIT_ADVISOR_SYSTEM_PROMPT, "user msg", EXIT_RECOMMENDATION_TOOL_SCHEMA)
+
+    assert not result.success
+    assert result.failure_reason == "llm_timeout"
+    assert call_count == 1, (
+        f"Wrapper must not retry on APITimeoutError (got {call_count} calls). "
+        "If this fails, max_retries=0 is no longer being honored — "
+        "see the DEFAULT_MAX_RETRIES comment in llm_client.py for context."
+    )
+
+
+def test_default_timeout_constant_matches_today_normal_case_latency() -> None:
+    """The default timeout pins at 12.0s.
+
+    Bumped from 8.0 → 12.0 after the 2026-05-05 CLRB session showed normal-case
+    Sonnet 4.6 tool-use latencies of 6.4s and 7.8s — too tight against the old
+    ceiling. 12.0 leaves ~50% headroom over observed normal latency. If you
+    have evidence to bump again, update this constant AND this test together.
+    """
+    assert AnthropicLLMClient.DEFAULT_TIMEOUT_SECONDS == 12.0
+    assert AnthropicLLMClient.DEFAULT_MAX_RETRIES == 0
+
+
+def test_settings_load_pins_llm_timeout_at_twelve_seconds() -> None:
+    """The shipped ``config.yaml`` must keep ``exit_advisor.llm_timeout_seconds`` at 12.0.
+
+    Pin the on-disk config value so a future YAML edit doesn't silently revert
+    the bump from the 2026-05-05 CLRB session findings.
+    """
+    from bot.config import get_settings
+
+    settings = get_settings()
+    assert settings.exit_advisor.llm_timeout_seconds == 12.0

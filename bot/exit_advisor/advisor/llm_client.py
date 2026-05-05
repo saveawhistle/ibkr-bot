@@ -68,7 +68,23 @@ class AnthropicLLMClient:
 
     DEFAULT_MODEL = "claude-sonnet-4-6"
     DEFAULT_MAX_TOKENS = 1024
-    DEFAULT_TIMEOUT_SECONDS = 8.0
+    DEFAULT_TIMEOUT_SECONDS = 12.0
+
+    # max_retries=0 disables the SDK's default 2-retry behavior. With the
+    # default max_retries=2, a configured timeout becomes effectively 3x as
+    # long in worst case (initial attempt + 2 retries, each respecting the
+    # per-attempt timeout). This made the configured timeout misleading —
+    # 8s configured, ~25s actual on 3 consecutive failures during the
+    # 2026-05-05 CLRB session, which tipped the advisor's self-disable
+    # threshold and killed it for the rest of the session.
+    #
+    # We bound total wait to ``timeout_seconds`` and rely on the
+    # application-level retry path (the agent's event-driven buffer/trigger
+    # loop in ``agent.py``) for resilience to transient failures. The next
+    # event-driven advisor call provides a fresh attempt within typically
+    # <60 seconds anyway, so SDK-level retries don't add meaningful value
+    # and only obscure the timeout contract.
+    DEFAULT_MAX_RETRIES = 0
 
     def __init__(
         self,
@@ -77,6 +93,7 @@ class AnthropicLLMClient:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         client: anthropic.Anthropic | None = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         if not api_key:
             raise ValueError("AnthropicLLMClient: api_key must be a non-empty string")
@@ -86,11 +103,20 @@ class AnthropicLLMClient:
             raise ValueError(
                 f"AnthropicLLMClient: timeout_seconds must be > 0 (got {timeout_seconds})"
             )
+        if max_retries < 0:
+            raise ValueError(f"AnthropicLLMClient: max_retries must be >= 0 (got {max_retries})")
         self._model = model
         self._max_tokens = max_tokens
         self._timeout_seconds = timeout_seconds
         # Allow injection of a fake client for tests; default to the real SDK.
-        self._client = client if client is not None else anthropic.Anthropic(api_key=api_key)
+        # Pass ``max_retries=0`` (see DEFAULT_MAX_RETRIES comment above) so the
+        # configured ``timeout_seconds`` is the truthful upper bound on wait
+        # time, not multiplied by the SDK's auto-retry budget.
+        self._client = (
+            client
+            if client is not None
+            else anthropic.Anthropic(api_key=api_key, max_retries=max_retries)
+        )
 
     @property
     def model(self) -> str:
