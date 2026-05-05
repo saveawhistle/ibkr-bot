@@ -150,7 +150,7 @@ exit_advisor:
   # ANTHROPIC_API_KEY is read from the environment at bootstrap; never put it here.
   llm_model: "claude-sonnet-4-6"          # pinned model; bump deliberately when validating a new release
   llm_max_tokens: 1024                     # output cap; tool-use response + reasoning fits comfortably under this
-  llm_timeout_seconds: 8.0                 # LLM-side timeout; the outer hook timeout (10s) is the safety net
+  llm_timeout_seconds: 12.0                # LLM-side timeout. Bumped from 8.0 → 12.0 after the 2026-05-05 CLRB session showed normal-case Sonnet 4.6 latencies of 6.4s and 7.8s — too close to the old ceiling, tipped over on a 90s API blip and tripped self-disable. 12.0 leaves ~50% headroom over observed normal latency; combined with max_retries=0 in llm_client.py the advisor now waits at most 12s per call (was ~25s with SDK auto-retry). The outer hook timeout (timeout_seconds above, 10s) is no longer wider than this — when the bump goes live, also widen timeout_seconds if you want the hook to be a true safety net, otherwise the hook's worker-thread cancel will fire first.
   cost_soft_cap_usd: 10.0                  # one-time Telegram warning at this cumulative session spend
   cost_hard_cap_usd: 50.0                  # advisor stops calling the LLM and returns deterministic 'hold' past this
   event_buffer_time_floor_seconds: 30.0    # bar/MA-cross events trigger only after this many seconds since last LLM call
