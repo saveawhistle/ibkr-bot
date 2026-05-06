@@ -103,17 +103,9 @@ class BarShapeDetector:
                 pb = self._prior_bar
                 if "engulfing" in self.enabled_shapes and self._is_engulfing(pb, bar):
                     events.append(self._shape_event(bar, bar_close_ts, "engulfing"))
-                if (
-                    "inside_bar" in self.enabled_shapes
-                    and bar.high < pb.high
-                    and bar.low > pb.low
-                ):
+                if "inside_bar" in self.enabled_shapes and bar.high < pb.high and bar.low > pb.low:
                     events.append(self._shape_event(bar, bar_close_ts, "inside_bar"))
-                if (
-                    "outside_bar" in self.enabled_shapes
-                    and bar.high > pb.high
-                    and bar.low < pb.low
-                ):
+                if "outside_bar" in self.enabled_shapes and bar.high > pb.high and bar.low < pb.low:
                     events.append(self._shape_event(bar, bar_close_ts, "outside_bar"))
 
             # --- wick events (separate from named shapes) ---

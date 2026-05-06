@@ -272,9 +272,7 @@ class Watchdog:
                 now=now,
             )
 
-    def _collect_bot_sell_orders(
-        self, open_trades: list[Any]
-    ) -> dict[str, list[WorkingSellOrder]]:
+    def _collect_bot_sell_orders(self, open_trades: list[Any]) -> dict[str, list[WorkingSellOrder]]:
         """Filter ``open_trades`` to bot-owned, currently-resting SELL orders, keyed by symbol."""
         bot_client_id = self._settings.ibkr.client_id
         out: dict[str, list[WorkingSellOrder]] = {}
@@ -576,9 +574,7 @@ class Watchdog:
         ):
             if key not in self._ack_logged:
                 self._ack_logged.add(key)
-                ack_ts = self._notifier.ack_timestamp(
-                    self._build_ack_id(symbol, classification)
-                )
+                ack_ts = self._notifier.ack_timestamp(self._build_ack_id(symbol, classification))
                 _log.info(
                     "watchdog.alert_acked",
                     symbol=symbol,
@@ -652,9 +648,7 @@ class Watchdog:
         # its own errors per its existing contract.
         import asyncio  # local import to avoid pulling asyncio into hot path  # noqa: PLC0415
 
-        asyncio.create_task(
-            self._notifier.send_alert_with_ack(text=text, ack_id=ack_id)
-        )
+        asyncio.create_task(self._notifier.send_alert_with_ack(text=text, ack_id=ack_id))
 
     def _build_ack_id(self, symbol: str, classification: Classification) -> str:
         """Compose the ack id used as the inline-keyboard callback_data."""

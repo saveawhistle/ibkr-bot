@@ -153,9 +153,11 @@ def test_truncated_log_handled_gracefully(tmp_path: Path) -> None:
     """A line that fails JSON parse is skipped without crashing."""
     log = tmp_path / "session_2026-04-30.jsonl"
     log.write_text(
-        json.dumps(_opened("AAPL", "2026-04-30T15:00:00Z")) + "\n"
+        json.dumps(_opened("AAPL", "2026-04-30T15:00:00Z"))
+        + "\n"
         + "MALFORMED LINE\n"
-        + json.dumps(_closed("AAPL", "2026-04-30T15:30:00Z")) + "\n",
+        + json.dumps(_closed("AAPL", "2026-04-30T15:30:00Z"))
+        + "\n",
         encoding="utf-8",
     )
     refs = discover_closed_trades(tmp_path)

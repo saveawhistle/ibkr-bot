@@ -592,9 +592,7 @@ class TestSymbolAttributionGate:
         Most sub-$20 press releases follow ``Company X (NASDAQ: TICKER) ...``;
         the word-boundary regex matches the bare ticker inside the parens.
         """
-        item = _item(
-            "Baiya International Group (NASDAQ: BIYA) Raises Guidance for FY26"
-        )
+        item = _item("Baiya International Group (NASDAQ: BIYA) Raises Guidance for FY26")
         assert classify([item], symbol="BIYA") == "earnings_beat"
 
     def test_ticker_only_in_summary_rejected_by_gate_1(self) -> None:

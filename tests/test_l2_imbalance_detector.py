@@ -18,13 +18,9 @@ def _build_book(bid_sizes: list[int], ask_sizes: list[int]) -> BookStateTracker:
     """Build a synthetic book with the given top-K sizes per side."""
     tracker = BookStateTracker()
     for i, size in enumerate(bid_sizes):
-        tracker.consume(
-            L2BookUpdate(_ts(), "X", "bid", "insert", i, 10.00 - i * 0.01, size)
-        )
+        tracker.consume(L2BookUpdate(_ts(), "X", "bid", "insert", i, 10.00 - i * 0.01, size))
     for i, size in enumerate(ask_sizes):
-        tracker.consume(
-            L2BookUpdate(_ts(), "X", "ask", "insert", i, 10.05 + i * 0.01, size)
-        )
+        tracker.consume(L2BookUpdate(_ts(), "X", "ask", "insert", i, 10.05 + i * 0.01, size))
     return tracker
 
 

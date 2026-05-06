@@ -31,7 +31,9 @@ def _ts(h: int, m: int, s: int = 0, ms: int = 0) -> datetime:
     return datetime(2026, 4, 30, h, m, s, ms * 1000, tzinfo=UTC)
 
 
-def _build_replay(bars: list[Bar], exit_price: float = 1.95, exit_minutes: int = 10) -> TradeReplayData:
+def _build_replay(
+    bars: list[Bar], exit_price: float = 1.95, exit_minutes: int = 10
+) -> TradeReplayData:
     """Synthetic long trade: entry 2.00, stop 1.90 ($0.10 risk), 100 shares."""
     entry_ts = _ts(13, 30, 0)  # 09:30 ET in DST
     exit_ts = entry_ts + timedelta(minutes=exit_minutes)

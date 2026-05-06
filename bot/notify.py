@@ -178,9 +178,7 @@ class Notifier:
         require defensive escaping. MarkdownV2 stays the default for the
         watchlist + signal + fill paths.
         """
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Ack", callback_data=ack_id)]]
-        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Ack", callback_data=ack_id)]])
         await self._send(text, reply_markup=keyboard, parse_mode=None)
 
     def is_alert_acked(self, ack_id: str) -> bool:

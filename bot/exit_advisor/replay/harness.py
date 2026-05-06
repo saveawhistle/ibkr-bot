@@ -142,10 +142,7 @@ class TradeReplayHarness:
 
         self._history = BarHistory()
         self._detectors: list[
-            PriceLevelsDetector
-            | MovingAveragesDetector
-            | VolumeDetector
-            | BarShapeDetector
+            PriceLevelsDetector | MovingAveragesDetector | VolumeDetector | BarShapeDetector
         ] = []
         self._ma_detector: MovingAveragesDetector | None = None
 
@@ -255,9 +252,7 @@ class TradeReplayHarness:
 
             decision = self._latest_decision_for_bar()
             if decision is not None and decision.action == "exit_full":
-                exit_price = (
-                    decision.fill_price if decision.fill_price is not None else bar.close
-                )
+                exit_price = decision.fill_price if decision.fill_price is not None else bar.close
                 self._apply_full_exit(
                     state, exit_price, bar_close_ts, decision.reason or "exit_full"
                 )
@@ -267,15 +262,11 @@ class TradeReplayHarness:
         # Terminal tick: gives replay-anchored policies a chance to fire even
         # when the recorded exit doesn't align with a bar boundary.
         if not exit_taken:
-            terminal = ReplayTerminalTick(
-                timestamp=rd.recorded_exit_timestamp, symbol=symbol
-            )
+            terminal = ReplayTerminalTick(timestamp=rd.recorded_exit_timestamp, symbol=symbol)
             decision = self._emit(terminal, state)
             if decision is not None and decision.action == "exit_full":
                 exit_price = (
-                    decision.fill_price
-                    if decision.fill_price is not None
-                    else state.current_price
+                    decision.fill_price if decision.fill_price is not None else state.current_price
                 )
                 self._apply_full_exit(
                     state,
@@ -596,9 +587,7 @@ class TradeReplayHarness:
                 symbol=state.symbol,
                 original_decision=decision,
                 final_decision=final,
-                gate_results=[
-                    (name, r.accepted, r.rejection_reason) for name, r in gate_results
-                ],
+                gate_results=[(name, r.accepted, r.rejection_reason) for name, r in gate_results],
             )
             self._events_log.append(chain_evt)
             self._gate_chain_results.append(chain_evt)

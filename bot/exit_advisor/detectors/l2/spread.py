@@ -32,9 +32,7 @@ class SpreadEventDetector:
     _history: deque[float] = field(default_factory=deque, init=False)
     _state: Literal["normal", "wide", "tight"] = field(default="normal", init=False)
 
-    def consume(
-        self, event: L2BookUpdate | L2Print, book_state: BookState
-    ) -> list[Event]:
+    def consume(self, event: L2BookUpdate | L2Print, book_state: BookState) -> list[Event]:
         # Only book updates can move top-of-book (prints don't shift
         # quotes). Skip prints — they'd add noise to the rolling window.
         if not isinstance(event, L2BookUpdate):

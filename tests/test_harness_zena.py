@@ -71,9 +71,7 @@ class _AlwaysExitPolicy:
     def __init__(self) -> None:
         self.events_seen: list[Event] = []
 
-    def on_event(
-        self, trade_state: TradeState, event: Event
-    ) -> ExitDecision | None:
+    def on_event(self, trade_state: TradeState, event: Event) -> ExitDecision | None:
         self.events_seen.append(event)
         return ExitDecision(action="exit_full", reason="AlwaysExit")
 
@@ -116,9 +114,7 @@ def test_zena_pnl_events_fire(
     assert any(e.r_multiple == 0.5 and e.direction == "down" for e in r_events)
 
     tod_milestones = {
-        e.minutes_after_open
-        for e in result.events_emitted
-        if isinstance(e, TimeOfDayMilestone)
+        e.minutes_after_open for e in result.events_emitted if isinstance(e, TimeOfDayMilestone)
     }
     assert 5 in tod_milestones
     assert 30 in tod_milestones

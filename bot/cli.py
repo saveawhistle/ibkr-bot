@@ -76,6 +76,33 @@ from bot.strategies.base import RejectedCandidate, Signal
 from bot.strategies.gap_and_go import GapAndGoStrategy
 from bot.strategies.momentum import MomentumStrategy
 
+
+def _make_scanner(
+    *,
+    ibkr: IBKRClient,
+    finnhub: FinnhubClient,
+    settings: Settings,
+    float_source: FloatSource,
+) -> IBKRScanner:
+    """Construct an :class:`IBKRScanner` with the Phase 12 LLM catalyst classifier.
+
+    Three CLI commands (``scan``, ``watch``, ``trade``) build a scanner the
+    same way; this helper centralises the construction so a future change
+    (extra constructor arg, different bootstrap source) lands in one place.
+    ``bootstrap_catalyst_classifier`` returns ``None`` when the LLM mode is
+    disabled or the ``ANTHROPIC_API_KEY`` is unset; the scanner falls back
+    to the keyword classifier or qualifies nothing per
+    ``catalyst_classifier.keyword.enabled``.
+    """
+    return IBKRScanner(
+        ibkr=ibkr,
+        finnhub=finnhub,
+        settings=settings,
+        float_source=float_source,
+        llm_classifier=bootstrap_catalyst_classifier(settings),
+    )
+
+
 app = typer.Typer(
     name="ibkr-bot",
     help="Automated day-trading bot.",
@@ -915,15 +942,11 @@ async def _scan(limit: int, notify: bool) -> None:
         ibkr = IBKRClient(settings=settings)
         await ibkr.connect()
         try:
-            scanner = IBKRScanner(
+            scanner = _make_scanner(
                 ibkr=ibkr,
                 finnhub=finnhub,
                 settings=settings,
                 float_source=float_source,
-                # Phase 12 — opt-in LLM catalyst classifier. Bootstrap
-                # returns None when the LLM mode is disabled or the
-                # API key is missing; the scanner falls back cleanly.
-                llm_classifier=bootstrap_catalyst_classifier(settings),
             )
             hits = await scanner.scan_top_gappers()
         finally:
@@ -957,15 +980,11 @@ async def _watch(duration: float | None, limit: int, poll_interval: float, notif
         ibkr = IBKRClient(settings=settings)
         await ibkr.connect()
         try:
-            scanner = IBKRScanner(
+            scanner = _make_scanner(
                 ibkr=ibkr,
                 finnhub=finnhub,
                 settings=settings,
                 float_source=float_source,
-                # Phase 12 — opt-in LLM catalyst classifier. Bootstrap
-                # returns None when the LLM mode is disabled or the
-                # API key is missing; the scanner falls back cleanly.
-                llm_classifier=bootstrap_catalyst_classifier(settings),
             )
             hits = await scanner.scan_top_gappers()
             hits = hits[:limit]
@@ -1108,15 +1127,11 @@ async def _trade(
 
         async with FinnhubClient(settings=settings) as finnhub:
             float_source = FloatSource(finnhub=finnhub)
-            scanner = IBKRScanner(
+            scanner = _make_scanner(
                 ibkr=ibkr,
                 finnhub=finnhub,
                 settings=settings,
                 float_source=float_source,
-                # Phase 12 — opt-in LLM catalyst classifier. Bootstrap
-                # returns None when the LLM mode is disabled or the
-                # API key is missing; the scanner falls back cleanly.
-                llm_classifier=bootstrap_catalyst_classifier(settings),
             )
             hits = await scanner.scan_top_gappers()
             hits = hits[:limit]

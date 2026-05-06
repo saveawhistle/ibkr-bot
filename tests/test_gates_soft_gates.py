@@ -37,9 +37,7 @@ def _state(**overrides: object) -> TradeState:
 
 
 def _ctx(ts: datetime | None = None) -> GateContext:
-    return GateContext(
-        current_timestamp=ts or datetime(2026, 4, 30, 14, 0, tzinfo=UTC)
-    )
+    return GateContext(current_timestamp=ts or datetime(2026, 4, 30, 14, 0, tzinfo=UTC))
 
 
 # --- ConfidenceThresholdGate ---

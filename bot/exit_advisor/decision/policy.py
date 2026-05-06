@@ -173,9 +173,7 @@ class MechanicalTrailPolicy:
         trail_pct: float | None = None,
     ) -> None:
         if (trail_abs is None) == (trail_pct is None):
-            raise ValueError(
-                "Provide exactly one of trail_abs or trail_pct"
-            )
+            raise ValueError("Provide exactly one of trail_abs or trail_pct")
         if trail_abs is not None and trail_abs <= 0:
             raise ValueError("trail_abs must be positive")
         if trail_pct is not None and not 0 < trail_pct < 1:
@@ -195,8 +193,7 @@ class MechanicalTrailPolicy:
         if proposed_stop <= trade_state.current_stop:
             return None
         param_str = (
-            f"abs_{self.trail_abs}" if self.trail_abs is not None
-            else f"pct_{self.trail_pct}"
+            f"abs_{self.trail_abs}" if self.trail_abs is not None else f"pct_{self.trail_pct}"
         )
         return ExitDecision(
             action="tighten_stop",
@@ -278,10 +275,7 @@ class StallExitPolicy:
             return ExitDecision(
                 action="exit_full",
                 confidence=1.0,
-                reason=(
-                    f"stall_exit_target_{self.target_r}"
-                    f"_not_reached_in_{self.max_minutes}m"
-                ),
+                reason=(f"stall_exit_target_{self.target_r}_not_reached_in_{self.max_minutes}m"),
             )
         return None
 

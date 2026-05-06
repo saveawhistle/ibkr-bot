@@ -215,9 +215,7 @@ class TestNameTokenCache:
         with capture_logs() as captured:
             cache.populate("SBLX", "")
             cache.populate("SBLX", None)
-        events = [
-            e for e in captured if e["event"] == "catalyst.name_extension_longname_missing"
-        ]
+        events = [e for e in captured if e["event"] == "catalyst.name_extension_longname_missing"]
         assert len(events) == 1
         assert events[0]["symbol"] == "SBLX"
 
@@ -228,9 +226,7 @@ class TestNameTokenCache:
             cache.populate("SPY", "SS SPDR S&P 500 ETF TRUST-US")  # tokens empty
             cache.populate("SBLX", "")  # longName missing
         no_tokens = [e for e in captured if e["event"] == "catalyst.name_extension_no_tokens"]
-        missing = [
-            e for e in captured if e["event"] == "catalyst.name_extension_longname_missing"
-        ]
+        missing = [e for e in captured if e["event"] == "catalyst.name_extension_longname_missing"]
         assert len(no_tokens) == 1 and no_tokens[0]["symbol"] == "SPY"
         assert len(missing) == 1 and missing[0]["symbol"] == "SBLX"
 
@@ -269,9 +265,7 @@ class TestNameTokenCache:
                     matched_token="akanda",
                     headline=f"Akanda News Item {i}",
                 )
-        high_rate = [
-            e for e in captured if e["event"] == "catalyst.name_extension_high_rate"
-        ]
+        high_rate = [e for e in captured if e["event"] == "catalyst.name_extension_high_rate"]
         assert len(high_rate) == 1, "high_rate fires exactly once per symbol per session"
         evt = high_rate[0]
         assert evt["symbol"] == "AKAN"
@@ -506,11 +500,7 @@ class TestClassifyNameExtension:
         without name extension correctly rejects (the original bug shape).
         """
         result = classify(
-            [
-                _item(
-                    "Shuttle Pharmaceutical Enters Definite Agreement To Acquire United Dogecoin"
-                )
-            ],
+            [_item("Shuttle Pharmaceutical Enters Definite Agreement To Acquire United Dogecoin")],
             symbol="SHPH",
             # No name_token_cache passed.
         )

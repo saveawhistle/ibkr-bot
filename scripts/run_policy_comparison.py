@@ -109,7 +109,9 @@ class PolicyRunResult:
     bars_consumed: int
 
 
-def _build_advisor_policies(replay_data: TradeReplayData) -> list[tuple[str, dict[str, Any], ExitPolicy]]:
+def _build_advisor_policies(
+    replay_data: TradeReplayData,
+) -> list[tuple[str, dict[str, Any], ExitPolicy]]:
     """Construct the full policy list for the sweep.
 
     Returns ``(name, params_dict, policy_instance)`` triples so the
@@ -242,9 +244,7 @@ def _format_summary_table(
         label = _policy_label(row.policy_name, row.policy_params)
         vs_actual = _format_pnl(row.effective_pnl - baseline_pnl)
         vs_oracle = _format_pnl(row.effective_pnl - oracle_pnl)
-        exit_str = (
-            f"{row.exit_price:.4f}" if row.exit_price is not None else "—"
-        )
+        exit_str = f"{row.exit_price:.4f}" if row.exit_price is not None else "—"
         open_marker = "✓" if row.final_position_size > 0 else ""
         lines.append(
             f"| {label} | {_format_pnl(row.effective_pnl)} | "
@@ -273,12 +273,10 @@ def _build_markdown_report(
 
     # Best mechanical (excluding ActualPolicy + OracleExitPolicy).
     mechanicals_on = [
-        r for r in rows_gates_on
-        if r.policy_name not in ("ActualPolicy", "OracleExitPolicy")
+        r for r in rows_gates_on if r.policy_name not in ("ActualPolicy", "OracleExitPolicy")
     ]
     mechanicals_off = [
-        r for r in rows_gates_off
-        if r.policy_name not in ("ActualPolicy", "OracleExitPolicy")
+        r for r in rows_gates_off if r.policy_name not in ("ActualPolicy", "OracleExitPolicy")
     ]
     best_on = max(mechanicals_on, key=lambda r: r.effective_pnl) if mechanicals_on else None
     best_off = max(mechanicals_off, key=lambda r: r.effective_pnl) if mechanicals_off else None
@@ -348,8 +346,7 @@ def _build_markdown_report(
     out.append("## Failure mode analysis\n\n")
     out.append("### Failure mode 1 — breakouts that don't reach 2:1\n\n")
     fm1_candidates = [
-        r for r in rows_gates_on
-        if r.policy_name in ("FixedRTakeProfit", "StallExitPolicy")
+        r for r in rows_gates_on if r.policy_name in ("FixedRTakeProfit", "StallExitPolicy")
     ]
     if fm1_candidates:
         best_fm1 = max(fm1_candidates, key=lambda r: r.effective_pnl)
@@ -501,9 +498,7 @@ def run_comparison(
     return md_path, jsonl_path
 
 
-def _reinstantiate(
-    name: str, params: dict[str, Any], replay_data: TradeReplayData
-) -> ExitPolicy:
+def _reinstantiate(name: str, params: dict[str, Any], replay_data: TradeReplayData) -> ExitPolicy:
     if name == "ActualPolicy":
         return ActualPolicy(replay_data)
     if name == "OracleExitPolicy":

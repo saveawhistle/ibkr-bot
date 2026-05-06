@@ -45,9 +45,7 @@ def test_zena_actual_policy_pnl_unchanged_with_cache(
     """Layer 1+2 correctness regression: ActualPolicy must still
     reproduce the recorded -$2.38 P&L within $0.01 even with the
     expanded pre-trade bar context."""
-    harness = TradeReplayHarness(
-        zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg
-    )
+    harness = TradeReplayHarness(zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg)
     result = harness.run()
     assert result.exit_price == zena_replay_with_cache.recorded_exit_price
     assert abs(result.final_pnl - zena_replay_with_cache.recorded_pnl) < 0.01
@@ -70,9 +68,7 @@ def test_zena_vwap_warm_full_session(
 ) -> None:
     """With pre-subscription bars now available, VWAP at trade start
     reflects the fuller session, not the last-10-min approximation."""
-    harness = TradeReplayHarness(
-        zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg
-    )
+    harness = TradeReplayHarness(zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg)
     harness.run()
     vwap = harness._history.session_vwap()
     assert vwap is not None
@@ -84,9 +80,7 @@ def test_zena_vwap_warm_full_session(
 def test_zena_ema_9_warm_full_session(
     zena_replay_with_cache: TradeReplayData, cfg: ExitEventsConfig
 ) -> None:
-    harness = TradeReplayHarness(
-        zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg
-    )
+    harness = TradeReplayHarness(zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg)
     harness.run()
     assert harness._ma_detector is not None
     ema = harness._ma_detector.ema_9_value()
@@ -101,15 +95,11 @@ def test_zena_prior_day_levels_compute_when_cache_populated(
     prior_day_low / prior_day_close should NOT fire when the prior-day
     cache file is present. Instead, those levels become live and may
     fire LevelTouched events when price reaches them."""
-    harness = TradeReplayHarness(
-        zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg
-    )
+    harness = TradeReplayHarness(zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg)
     result = harness.run()
 
     unavailable_levels = {
-        e.level_name
-        for e in result.events_emitted
-        if isinstance(e, LevelDataUnavailable)
+        e.level_name for e in result.events_emitted if isinstance(e, LevelDataUnavailable)
     }
     # Prior-day-derived levels must NO LONGER appear as unavailable.
     assert "prior_day_high" not in unavailable_levels
@@ -120,11 +110,7 @@ def test_zena_prior_day_levels_compute_when_cache_populated(
     # least one of them should produce a LevelTouched event during the
     # pre-trade backfill or trade window (the synthetic fixture's price
     # band overlaps prior-day's, so touches are expected).
-    touched_levels = {
-        e.level_name
-        for e in result.events_emitted
-        if isinstance(e, LevelTouched)
-    }
+    touched_levels = {e.level_name for e in result.events_emitted if isinstance(e, LevelTouched)}
     prior_day_levels = {"prior_day_high", "prior_day_low", "prior_day_close"}
     assert touched_levels & prior_day_levels, (
         f"expected at least one prior-day level touch, got {touched_levels}"
@@ -137,9 +123,7 @@ def test_zena_event_counts_summary(
     """Sanity floor — layer 2.5's expanded backfill produces materially
     more events than layer 2's narrow backfill did. Specific counts
     aren't pre-specified; we just assert the rough shape."""
-    harness = TradeReplayHarness(
-        zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg
-    )
+    harness = TradeReplayHarness(zena_replay_with_cache, ActualPolicy(zena_replay_with_cache), cfg)
     result = harness.run()
     counts = Counter(type(e).__name__ for e in result.events_emitted)
     # Pre-trade bars now warm up the MA detector, so multiple crosses

@@ -457,6 +457,5 @@ def test_deep_rehab_one_setup_a_day(tmp_path: Path) -> None:
     )
     caps = engine.apply_to_caps()
     assert caps.max_trades_per_day == 1, (
-        "the rule: one setup a day in a deep slump. "
-        "deep_rehab_max_trades_per_day must stay at 1."
+        "the rule: one setup a day in a deep slump. deep_rehab_max_trades_per_day must stay at 1."
     )

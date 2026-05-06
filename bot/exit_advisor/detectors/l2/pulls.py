@@ -46,16 +46,12 @@ class _PullsDetectorBase:
     _last_seen_size: dict[float, int] = field(default_factory=dict, init=False)
     _last_seen_position: dict[float, int] = field(default_factory=dict, init=False)
 
-    def consume(
-        self, event: L2BookUpdate | L2Print, book_state: BookState
-    ) -> list[Event]:
+    def consume(self, event: L2BookUpdate | L2Print, book_state: BookState) -> list[Event]:
         if isinstance(event, L2BookUpdate):
             return self._on_book_update(event, book_state)
         return []  # Prints don't drive this detector directly.
 
-    def _on_book_update(
-        self, evt: L2BookUpdate, book_state: BookState
-    ) -> list[Event]:
+    def _on_book_update(self, evt: L2BookUpdate, book_state: BookState) -> list[Event]:
         if evt.side != self.side:
             return []
         if evt.operation in ("insert", "update"):
@@ -93,9 +89,7 @@ class _PullsDetectorBase:
 class BidPulledDetector(_PullsDetectorBase):
     side: Literal["bid", "ask"] = "bid"
 
-    def _make_event(
-        self, evt: L2BookUpdate, size_pulled: int, position: int
-    ) -> Event:
+    def _make_event(self, evt: L2BookUpdate, size_pulled: int, position: int) -> Event:
         return BidPulled(
             timestamp=evt.timestamp,
             symbol=self.symbol,
@@ -109,9 +103,7 @@ class BidPulledDetector(_PullsDetectorBase):
 class OfferPulledDetector(_PullsDetectorBase):
     side: Literal["bid", "ask"] = "ask"
 
-    def _make_event(
-        self, evt: L2BookUpdate, size_pulled: int, position: int
-    ) -> Event:
+    def _make_event(self, evt: L2BookUpdate, size_pulled: int, position: int) -> Event:
         return OfferPulled(
             timestamp=evt.timestamp,
             symbol=self.symbol,

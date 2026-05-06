@@ -52,7 +52,7 @@ MKTDATA_WAIT_SECONDS = 5.0
 # data XML.
 RESTRICTION_KEYWORDS = (
     "restrict",
-    "close",   # "close-only"
+    "close",  # "close-only"
     "halt",
     "compliance",
     "shortable",
@@ -148,9 +148,7 @@ async def probe_contract_details(
     return flat, hits
 
 
-async def probe_mkt_data(
-    client: IBKRClient, symbol: str
-) -> tuple[dict[str, Any], list[str]]:
+async def probe_mkt_data(client: IBKRClient, symbol: str) -> tuple[dict[str, Any], list[str]]:
     """(b) reqMktData with generic ticks 236,318,588 — capture the streaming ticker."""
     _sub(f"{symbol} | (b) reqMktData(generic={GENERIC_TICKS}) for {MKTDATA_WAIT_SECONDS}s")
     contract = Stock(symbol, "SMART", "USD")
@@ -183,9 +181,19 @@ async def probe_mkt_data(
     flat = _kv_dump(ticker)
     # Strip noisy collections that aren't field-like; keep restriction-shaped
     # scalars (halted, shortable, shortableShares, snapshotPermissions, etc.).
-    skip = {"ticks", "tickByTicks", "domBids", "domAsks", "domTicks",
-            "domBidsDict", "domAsksDict", "updateEvent", "defaults",
-            "created", "contract"}
+    skip = {
+        "ticks",
+        "tickByTicks",
+        "domBids",
+        "domAsks",
+        "domTicks",
+        "domBidsDict",
+        "domAsksDict",
+        "updateEvent",
+        "defaults",
+        "created",
+        "contract",
+    }
     printable = {k: v for k, v in flat.items() if k not in skip}
     for k in sorted(printable):
         v = printable[k]
@@ -232,9 +240,7 @@ async def probe_scanner(
     ]
     try:
         scan_rows = await asyncio.wait_for(
-            client.ib.reqScannerDataAsync(
-                sub, scannerSubscriptionFilterOptions=tag_filters
-            ),
+            client.ib.reqScannerDataAsync(sub, scannerSubscriptionFilterOptions=tag_filters),
             timeout=15.0,
         )
     except Exception as exc:  # noqa: BLE001
@@ -257,8 +263,10 @@ async def probe_scanner(
     for sym in symbols:
         row = rows_by_symbol.get(sym)
         if row is None:
-            print(f"  {sym}: ABSENT from scan results (signal — symbol may be filtered "
-                  "out by TWS server-side close-only handling)")
+            print(
+                f"  {sym}: ABSENT from scan results (signal — symbol may be filtered "
+                "out by TWS server-side close-only handling)"
+            )
             per_symbol_flat[sym] = {"_absent_from_scan_": True}
             per_symbol_hits[sym] = []
             continue
@@ -279,9 +287,7 @@ async def probe_scanner(
     return per_symbol_flat, per_symbol_hits
 
 
-async def probe_fundamental(
-    client: IBKRClient, symbol: str
-) -> tuple[str, list[str]]:
+async def probe_fundamental(client: IBKRClient, symbol: str) -> tuple[str, list[str]]:
     """(d) reqFundamentalData(ReportsFinSummary) — only run if (a)–(c) were silent."""
     _sub(f"{symbol} | (d) reqFundamentalDataAsync(ReportsFinSummary)")
     contract = Stock(symbol, "SMART", "USD")
@@ -320,10 +326,9 @@ async def probe_fundamental(
 
 def _value_repr(v: Any) -> str:
     """Stable string repr for diff comparison (handles NaN consistently)."""
-    if isinstance(v, float):
-        # NaN != NaN, normalise so the diff doesn't flag every NaN field as different
-        if v != v:  # noqa: PLR0124 - intentional NaN check
-            return "NaN"
+    # NaN != NaN — normalise so the diff doesn't flag every NaN field as different.
+    if isinstance(v, float) and v != v:  # noqa: PLR0124 - intentional NaN check
+        return "NaN"
     return repr(v)
 
 
@@ -335,8 +340,9 @@ def diff_fields(per_symbol: dict[str, dict[str, Any]]) -> None:
         all_keys.update(flat.keys())
     diffs: list[tuple[str, dict[str, str]]] = []
     for key in sorted(all_keys):
-        values = {sym: _value_repr(per_symbol.get(sym, {}).get(key, "<MISSING>"))
-                  for sym in per_symbol}
+        values = {
+            sym: _value_repr(per_symbol.get(sym, {}).get(key, "<MISSING>")) for sym in per_symbol
+        }
         unique = set(values.values())
         if len(unique) <= 1:
             continue
@@ -359,8 +365,8 @@ async def main() -> None:
 
     def _on_error(
         reqId: int,  # noqa: N803 - mirror ib_async signature
-        errorCode: int,
-        errorString: str,
+        errorCode: int,  # noqa: N803 - mirror ib_async signature
+        errorString: str,  # noqa: N803 - mirror ib_async signature
         contract: object = None,
     ) -> None:
         # Capture restriction-shaped error codes plus anything containing
@@ -401,8 +407,10 @@ async def main() -> None:
         # (control); we mainly care that HCAI/FATN got something earlier.
         any_test_signal = any(per_symbol_hits[s] for s in TEST_SYMBOLS)
         if any_test_signal:
-            print("\n[skip d] (a)-(c) already returned restriction-shaped tokens "
-                  "for at least one test symbol; skipping fundamental-data probe.")
+            print(
+                "\n[skip d] (a)-(c) already returned restriction-shaped tokens "
+                "for at least one test symbol; skipping fundamental-data probe."
+            )
         else:
             _delim("Probe (a)-(c) silent — running (d) reqFundamentalData")
             for sym in ALL_SYMBOLS:
@@ -415,8 +423,8 @@ async def main() -> None:
         # Captured error stream
         _delim("CAPTURED IB errorEvent ENTRIES (filtered to restriction-shaped)")
         if captured_errors:
-            for reqId, code, msg in captured_errors:
-                print(f"  reqId={reqId} code={code} msg={msg}")
+            for req_id, code, msg in captured_errors:
+                print(f"  reqId={req_id} code={code} msg={msg}")
         else:
             print("  (none captured during probe window)")
 

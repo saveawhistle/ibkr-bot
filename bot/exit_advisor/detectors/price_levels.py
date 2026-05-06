@@ -21,9 +21,7 @@ RETOUCH_DIST_PCT = 0.005
 """0.5% — price must move at least this far from a level before another
 LevelTouched of the same direction will fire."""
 
-LevelName = Literal[
-    "hod", "lod", "prior_day_high", "prior_day_low", "prior_day_close", "gap_fill"
-]
+LevelName = Literal["hod", "lod", "prior_day_high", "prior_day_low", "prior_day_close", "gap_fill"]
 
 
 @dataclass
@@ -78,9 +76,7 @@ class PriceLevelsDetector:
             self._process_static(bar, bar_close_ts, "prior_day_low", self.prior_day_low, events)
 
         if self.prior_day_close_enabled:
-            self._process_static(
-                bar, bar_close_ts, "prior_day_close", self.prior_day_close, events
-            )
+            self._process_static(bar, bar_close_ts, "prior_day_close", self.prior_day_close, events)
 
         if self.gap_fill_enabled:
             gap_level = self._gap_fill_level()

@@ -150,9 +150,7 @@ def test_no_event_when_floor_does_not_bind() -> None:
     """Quiet path — structural already wider than floor → no event at all."""
     with capture_logs() as captured:
         _floor(entry=10.00, structural=9.50)
-    assert not any(
-        e.get("event") == "entry.stop_distance_floor_applied" for e in captured
-    )
+    assert not any(e.get("event") == "entry.stop_distance_floor_applied" for e in captured)
 
 
 def test_zero_min_abs_disables_abs_branch() -> None:
@@ -173,9 +171,7 @@ def test_both_floors_zero_returns_structural_unchanged() -> None:
     with capture_logs() as captured:
         out = _floor(entry=2.18, structural=2.17, min_abs=0.0, min_pct=0.0)
     assert out == pytest.approx(2.17)
-    assert not any(
-        e.get("event") == "entry.stop_distance_floor_applied" for e in captured
-    )
+    assert not any(e.get("event") == "entry.stop_distance_floor_applied" for e in captured)
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +234,7 @@ def test_momentum_zena_scenario_emits_floored_stop() -> None:
     assert emitted["pullback_low"] == pytest.approx(2.17)
     assert emitted["stop"] == pytest.approx(2.13)
     # The floor-applied event fires with the correct branch tag.
-    floor_evt = next(
-        e for e in captured if e.get("event") == "entry.stop_distance_floor_applied"
-    )
+    floor_evt = next(e for e in captured if e.get("event") == "entry.stop_distance_floor_applied")
     assert floor_evt["symbol"] == "ZENA"
     assert floor_evt["strategy"] == "momentum"
     assert floor_evt["which_floor_won"] == "min_abs"
@@ -273,9 +267,7 @@ def test_momentum_no_floor_event_when_structural_already_wide_enough() -> None:
         signal = strategy.evaluate("WIDE", bars)
     assert signal is not None
     assert signal.stop == pytest.approx(10.00)  # structural unchanged
-    assert not any(
-        e.get("event") == "entry.stop_distance_floor_applied" for e in captured
-    )
+    assert not any(e.get("event") == "entry.stop_distance_floor_applied" for e in captured)
 
 
 def _gap_and_go_frame_with_tight_stop() -> pd.DataFrame:
@@ -319,7 +311,6 @@ def test_gap_and_go_floor_applies_when_structural_too_tight() -> None:
     # Floored to 2.13 (5¢ floor wins).
     assert signal.stop == pytest.approx(2.13)
     assert any(
-        e.get("event") == "entry.stop_distance_floor_applied"
-        and e.get("strategy") == "gap_and_go"
+        e.get("event") == "entry.stop_distance_floor_applied" and e.get("strategy") == "gap_and_go"
         for e in captured
     )
