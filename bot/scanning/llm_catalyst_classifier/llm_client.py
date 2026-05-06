@@ -87,6 +87,14 @@ class LLMCallResult:
     Either ``success=True`` with a populated ``classification``, or
     ``success=False`` with a populated ``failure_reason``. ``cost_usd``
     is always populated; failures cost zero (no usage reported).
+
+    ``transient=True`` marks failures the operator's normal cadence will
+    naturally recover from -- the canonical case is Anthropic returning
+    HTTP 529 ``OverloadedError`` (a capacity blip on their side, not a
+    bug on ours). The classifier excludes transient failures from the
+    self-disable failure-rate counter so a 5-minute Anthropic hiccup
+    can't take the catalyst pillar offline for the rest of the session
+    when the next 5-minute rescan would have recovered cleanly.
     """
 
     success: bool
@@ -95,6 +103,7 @@ class LLMCallResult:
     duration_seconds: float
     failure_reason: str | None = None
     raw_response_for_forensics: dict[str, Any] | None = field(default=None)
+    transient: bool = False
 
 
 class AnthropicCatalystClient:
@@ -182,6 +191,24 @@ class AnthropicCatalystClient:
                 cost_usd=0.0,
                 duration_seconds=time.monotonic() - started,
                 failure_reason="llm_timeout",
+            )
+        except anthropic.APIStatusError as exc:
+            # Anthropic capacity blip (HTTP 529 OverloadedError). The next
+            # 5-minute scanner rescan typically recovers cleanly, so flag
+            # it transient -- the classifier excludes transient failures
+            # from the self-disable rate so a short outage on Anthropic's
+            # side doesn't take the catalyst pillar offline for the rest
+            # of the session. ``OverloadedError`` isn't exported at the
+            # SDK top level (anthropic 0.97), so we match by status code.
+            transient = getattr(exc, "status_code", None) == 529
+            reason_prefix = "overloaded" if transient else "api_error"
+            return LLMCallResult(
+                success=False,
+                classification=None,
+                cost_usd=0.0,
+                duration_seconds=time.monotonic() - started,
+                failure_reason=f"{reason_prefix}: {type(exc).__name__}: {exc}",
+                transient=transient,
             )
         except anthropic.APIError as exc:
             return LLMCallResult(

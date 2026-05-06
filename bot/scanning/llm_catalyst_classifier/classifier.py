@@ -247,18 +247,30 @@ class LLMCatalystClassifier:
             now=now or datetime.now(_NY),
         )
 
-        self._counters.total_calls += 1
+        # Transient failures (Anthropic 529 OverloadedError) are invisible
+        # to the self-disable accounting -- excluded from BOTH numerator
+        # and denominator so the rate reflects only outcomes we control.
+        # The next 5-minute rescan naturally recovers once Anthropic
+        # restores capacity, so a short-lived blip shouldn't take the
+        # pillar offline for the rest of the session. The failure still
+        # logs as ``catalyst_classifier.failure`` (with ``transient=True``)
+        # so the operator can audit how often this happens.
+        if not result.transient:
+            self._counters.total_calls += 1
         self._cost_tracker.record_cost(result.cost_usd)
 
         if not result.success:
-            self._counters.failed_calls += 1
+            if not result.transient:
+                self._counters.failed_calls += 1
             _log.warning(
                 "catalyst_classifier.failure",
                 ticker=ticker,
                 failure_reason=result.failure_reason,
                 duration_seconds=round(result.duration_seconds, 3),
+                transient=result.transient,
             )
-            self._check_self_disable()
+            if not result.transient:
+                self._check_self_disable()
             return ClassificationResult(
                 ticker=ticker,
                 qualifies=False,
