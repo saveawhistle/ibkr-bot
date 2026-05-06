@@ -1,14 +1,15 @@
 """IBKR TOP_PERC_GAIN scan → Finnhub float + news enrichment → ranked morning watchlist.
 
 The scanner implements the non-strategy portion of the 5-Pillar filter (price,
-% change, volume, float, catalyst). Price / change% / volume are enforced on the
-IBKR side via scanner TagValues; float + catalyst are applied post-scan from
-Finnhub. Phase 5.3 adds a numeric market-data enrichment step after the float +
-catalyst filter pass, populating ``price``, ``change_pct``, and ``volume`` via
-``reqHistoricalData`` ("1 day" × 2 bars) for rows that passed both filters. The
-existing sort at :meth:`IBKRScanner.scan_top_gappers` already prefers numeric
-``change_pct`` descending when present, so populating these fields upgrades the
-watchlist ordering automatically.
+% change, premarket volume, float, rvol, catalyst). Price / change% / premarket
+volume are enforced on the IBKR side via scanner TagValues; float, rvol, and
+catalyst are applied post-scan in cheapest-first order so the LLM catalyst call
+only runs against symbols that have already cleared every cheaper pillar.
+
+Phase 12.1: quote enrichment (``price`` / ``change_pct`` / ``volume`` via
+``reqHistoricalData``) runs immediately after the float filter -- the rvol
+pillar uses ``volume`` as its numerator, and pruning before catalyst saves LLM
+spend on symbols that wouldn't qualify anyway.
 """
 
 from __future__ import annotations
@@ -47,6 +48,11 @@ class ScanHit:
     ``price``/``change_pct``/``volume`` are Optional because IBKR's scanner
     snapshot does not expose them in Phase 2; rows are ordered by the scanner's
     own TOP_PERC_GAIN rank when numerical change_pct is not available.
+
+    ``rvol`` (Phase 12.1) is today's session volume divided by yfinance's
+    10-day average daily volume. Populated when both inputs are known; the
+    rvol pillar drops the symbol upstream when either is missing or the
+    ratio is below ``universe.rvol_min``.
     """
 
     symbol: str
@@ -58,6 +64,8 @@ class ScanHit:
     float_source: str | None = None
     news_items: list[NewsItem] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
+    rvol: float | None = None
+    avg_daily_volume: int | None = None
 
 
 class IBKRScanner:
@@ -189,13 +197,23 @@ class IBKRScanner:
         downstream (ScanHit, strategy evaluation, executor) runs
         identically to an organically-classified hit.
 
-        Phase 12: catalyst evaluation runs as the LAST gating step
-        (after price/change/volume/float). When
-        ``catalyst_classifier.llm.enabled=true`` AND a classifier was
-        wired (bootstrap succeeded), per-ticker news fetch +
-        classification run concurrently via ``asyncio.gather``. The
+        Phase 12: when ``catalyst_classifier.llm.enabled=true`` AND a
+        classifier was wired (bootstrap succeeded), per-ticker news fetch
+        + classification run concurrently via ``asyncio.gather``. The
         keyword classifier remains as a fallback when the LLM path is
         disabled OR the bootstrap returned ``None``.
+
+        Phase 12.1 pillar order (cheap -> expensive, prune as we go):
+        1. IBKR scanner snapshot (price / gap% / premarket vol enforced
+           by ``ScannerSubscription`` TagValues).
+        2. Float filter (yfinance + Finnhub fallback).
+        3. Quote fetch (one IBKR ``reqHistoricalData`` per float-survivor,
+           parallelized).
+        4. Rvol filter (today's session volume / 10-day avg daily volume
+           >= ``universe.rvol_min``). Drops on either-unknown.
+        5. Catalyst classification (LLM or keyword) -- only the most
+           expensive call runs, and only for symbols past every cheaper
+           pillar.
         """
         contracts = await self._fetch_ibkr_gappers()
         if not contracts:
@@ -203,6 +221,16 @@ class IBKRScanner:
             return []
         floats = await self._fetch_floats([c.symbol for c in contracts])
         survivors = self._apply_float_filter(contracts, floats)
+        if not survivors:
+            return []
+        # Phase 12.1 — quote enrichment runs BEFORE catalyst classification
+        # so the rvol pillar can prune candidates the LLM would otherwise
+        # be billed to evaluate. Best-effort: failures populate (None, None,
+        # None) and the rvol filter treats those as ``rvol_unknown``.
+        quotes = await self._fetch_quotes_map(survivors)
+        survivors, rvol_map = self._apply_rvol_filter(survivors, quotes, floats)
+        if not survivors:
+            return []
         # Phase 6.8 override map — empty dict when the flag is off, so
         # every symbol follows the Finnhub path and the store is never
         # touched. Expired entries are filtered inside the helper.
@@ -237,10 +265,13 @@ class IBKRScanner:
                 override=overrides.get(c.symbol),
                 llm_result=llm_results.get(c.symbol),
                 mode=mode,
+                quote=quotes.get(c.symbol),
+                rvol=rvol_map.get(c.symbol),
             )
             for c in survivors
         ]
-        # Phase 6.11: drop symbols whose catalyst never landed. the # 5-pillar rule treats news as mandatory — subscribing bars for
+        # Phase 6.11: drop symbols whose catalyst never landed. The
+        # 5-pillar rule treats news as mandatory — subscribing bars for
         # a no-catalyst symbol just burns an IBKR slot (cap=10) that the
         # next rescan's catalyst-bearing candidate could use. The 5-min
         # rescan interval recovers any symbol where news lands after
@@ -258,12 +289,6 @@ class IBKRScanner:
                 )
                 continue
             hits.append(hit)
-        # Phase 5.3: enrich only the rows that survived both the float filter
-        # (already dropped above) and the catalyst filter (``catalyst is not
-        # None``). Enrichment is best-effort — failures populate None and the
-        # watchlist renderer falls back to dashes.
-        contract_by_symbol = {c.symbol: c for c in survivors}
-        await self._enrich_market_data(hits, contract_by_symbol)
         # Preserve IBKR scanner rank when we can't compute change_pct numerically.
         indexed = list(enumerate(hits))
         indexed.sort(
@@ -370,6 +395,66 @@ class IBKRScanner:
             survivors.append(contract)
         return survivors
 
+    def _apply_rvol_filter(
+        self,
+        contracts: list[Contract],
+        quotes: dict[str, tuple[float | None, float | None, int | None]],
+        floats: dict[str, FloatData | None],
+    ) -> tuple[list[Contract], dict[str, float]]:
+        """Drop symbols whose rvol is unknown or below ``universe.rvol_min``.
+
+        rvol = today's session volume / 10-day average daily volume. Both
+        inputs come from earlier pillars: today-volume from the IBKR quote
+        fetch (premarket included via ``useRTH=False``), avg-volume from
+        yfinance's ``averageVolume10days`` field carried on ``FloatData``.
+
+        Symmetric with the float pillar's drop-on-unknown policy: if either
+        numerator or denominator is missing, the symbol is dropped with
+        ``scanner.dropped_rvol_unknown`` rather than silently passing
+        through. The 5-min rescan recovers any ticker whose data lands
+        between passes.
+
+        ``rvol_min <= 0`` disables the filter entirely (every symbol passes,
+        rvol still computed when both inputs are available). Useful for
+        backtest harnesses and for tests that don't care about rvol.
+        """
+        threshold = self._settings.universe.rvol_min
+        survivors: list[Contract] = []
+        rvol_map: dict[str, float] = {}
+        for contract in contracts:
+            symbol = contract.symbol
+            today_volume = quotes.get(symbol, (None, None, None))[2]
+            float_data = floats.get(symbol)
+            avg_volume = float_data.avg_daily_volume if float_data is not None else None
+            if threshold <= 0:
+                # Pillar disabled — populate rvol when possible but don't drop.
+                if today_volume and avg_volume and avg_volume > 0:
+                    rvol_map[symbol] = today_volume / avg_volume
+                survivors.append(contract)
+                continue
+            if not today_volume or not avg_volume or avg_volume <= 0:
+                _log.info(
+                    "scanner.dropped_rvol_unknown",
+                    symbol=symbol,
+                    today_volume=today_volume,
+                    avg_daily_volume=avg_volume,
+                )
+                continue
+            rvol = today_volume / avg_volume
+            if rvol < threshold:
+                _log.info(
+                    "scanner.dropped_low_rvol",
+                    symbol=symbol,
+                    rvol=round(rvol, 2),
+                    rvol_min=threshold,
+                    today_volume=today_volume,
+                    avg_daily_volume=avg_volume,
+                )
+                continue
+            rvol_map[symbol] = rvol
+            survivors.append(contract)
+        return survivors, rvol_map
+
     async def _populate_name_token_cache(self, symbols: list[str]) -> None:
         """Phase 10.5 — fetch ``longName`` per symbol concurrently and seed the cache.
 
@@ -465,6 +550,8 @@ class IBKRScanner:
         override: CatalystOverride | None = None,
         llm_result: ClassificationResult | None = None,
         mode: str = "keyword",
+        quote: tuple[float | None, float | None, int | None] | None = None,
+        rvol: float | None = None,
     ) -> ScanHit:
         """Assemble a single ``ScanHit`` with catalyst classified and reasons populated.
 
@@ -524,16 +611,20 @@ class IBKRScanner:
             reasons.append("float_unknown")
         if catalyst is None:
             reasons.append("no_catalyst")
+        price, change_pct, volume = quote if quote is not None else (None, None, None)
+        avg_daily_volume = float_data.avg_daily_volume if float_data is not None else None
         return ScanHit(
             symbol=contract.symbol,
-            price=None,
-            change_pct=None,
-            volume=None,
+            price=price,
+            change_pct=change_pct,
+            volume=volume,
             float_shares=float_shares,
             catalyst=catalyst,
             float_source=float_source,
             news_items=news_items,
             reasons=reasons,
+            rvol=rvol,
+            avg_daily_volume=avg_daily_volume,
         )
 
     def _load_active_overrides(self) -> dict[str, CatalystOverride]:
@@ -547,29 +638,24 @@ class IBKRScanner:
             return {}
         return load_active_overrides_map(now=datetime.now(UTC))
 
-    async def _enrich_market_data(
+    async def _fetch_quotes_map(
         self,
-        hits: list[ScanHit],
-        contracts: dict[str, Contract],
-    ) -> None:
-        """Populate ``price``/``change_pct``/``volume`` in-place for catalyst-bearing hits.
+        contracts: list[Contract],
+    ) -> dict[str, tuple[float | None, float | None, int | None]]:
+        """Fetch ``(price, change_pct, volume)`` for every contract, parallelized.
 
-        Only rows with a non-None ``catalyst`` are enriched — high-float rows
-        are already dropped upstream, and ``no_catalyst`` rows aren't worth the
-        IBKR round-trip. All per-symbol calls are launched concurrently via
-        ``asyncio.gather`` so total wall time is bounded by the slowest symbol
-        (or the 2 s timeout), not by N × 2 s.
+        Phase 12.1: this runs immediately after the float filter so the rvol
+        pillar can use ``volume`` as its numerator before any catalyst spend.
+        Per-symbol failures yield ``(None, None, None)`` -- the rvol filter
+        treats those as ``rvol_unknown`` and drops the symbol with a
+        structured log.
         """
-        enrichable = [h for h in hits if h.catalyst is not None]
-        if not enrichable:
-            return
+        if not contracts:
+            return {}
         results = await asyncio.gather(
-            *(self._fetch_quote(h.symbol, contracts[h.symbol]) for h in enrichable)
+            *(self._fetch_quote(c.symbol, c) for c in contracts)
         )
-        for hit, (price, change_pct, volume) in zip(enrichable, results, strict=True):
-            hit.price = price
-            hit.change_pct = change_pct
-            hit.volume = volume
+        return {c.symbol: result for c, result in zip(contracts, results, strict=True)}
 
     async def _cancel_enrichment_task(
         self,
@@ -617,12 +703,18 @@ class IBKRScanner:
     ) -> tuple[float | None, float | None, int | None]:
         """Return ``(price, change_pct, volume)`` via a 2-bar daily history pull.
 
-        Request semantics: ``"2 D"`` of ``"1 day"`` RTH bars → typically returns
-        ``[yesterday, today]`` during RTH and just ``[yesterday]`` premarket.
-        During premarket we surface yesterday's close as ``price`` and ``0.0``
-        as ``change_pct`` so the watchlist renders a real value instead of
-        dashes; a ``scanner.enrichment_premarket_unavailable`` event flags the
-        row for operator review.
+        Request semantics (Phase 12.1): ``"2 D"`` of ``"1 day"`` bars with
+        ``useRTH=False`` so today's bar includes premarket activity. Without
+        this, premarket scans returned yesterday's RTH volume as the
+        ``today_volume`` proxy, which made the rvol pillar always read ~1.0
+        and useless. Today returns ``[yesterday, today]`` during RTH and
+        just ``[yesterday]`` very early in the premarket session.
+
+        During the early-premarket case we surface yesterday's close as
+        ``price`` and ``0.0`` as ``change_pct`` so the watchlist renders a
+        real value instead of dashes; a
+        ``scanner.enrichment_premarket_unavailable`` event flags the row
+        for operator review.
         """
         # ``asyncio.wait_for`` only cancels the awaiting coroutine — the
         # IBKR-side subscription keeps its market-data line allocated until an
@@ -638,7 +730,7 @@ class IBKRScanner:
                 durationStr="2 D",
                 barSizeSetting="1 day",
                 whatToShow="TRADES",
-                useRTH=True,
+                useRTH=False,
                 formatDate=2,
                 keepUpToDate=False,
             )

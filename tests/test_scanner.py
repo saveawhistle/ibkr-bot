@@ -24,15 +24,20 @@ def _fake_scan_row(symbol: str) -> SimpleNamespace:
     return SimpleNamespace(contractDetails=SimpleNamespace(contract=SimpleNamespace(symbol=symbol)))
 
 
-def _settings(float_max: int = 20_000_000) -> Settings:
+def _settings(float_max: int = 20_000_000, rvol_min: float = 0.0) -> Settings:
     """Build a Settings instance with a known UniverseConfig for assertions.
 
     Phase 12: pre-existing scanner tests exercise the keyword classifier
     path. Force the catalyst-classifier mode resolution to keyword by
     flipping ``llm.enabled=False`` and ``keyword.enabled=True``. New
     tests targeting the LLM path opt in explicitly.
+
+    Phase 12.1: ``rvol_min`` defaults to 0.0 so the rvol pillar is a
+    pass-through for legacy tests that don't wire avg_daily_volume.
+    Tests targeting the rvol filter opt in by passing rvol_min=5.0
+    (or whatever value makes their assertion sharp).
     """
-    base = Settings(universe=UniverseConfig(float_max=float_max))
+    base = Settings(universe=UniverseConfig(float_max=float_max, rvol_min=rvol_min))
     return base.model_copy(
         update={
             "catalyst_classifier": base.catalyst_classifier.model_copy(
@@ -413,7 +418,7 @@ async def test_mixed_float_sources_roundtrip() -> None:
 async def test_scanner_passes_configured_lookback_to_finnhub() -> None:
     """Scanner forwards ``data_sources.news_lookback_hours`` to ``company_news``."""
     settings = Settings(
-        universe=UniverseConfig(float_max=20_000_000),
+        universe=UniverseConfig(float_max=20_000_000, rvol_min=0.0),
         data_sources=DataSourcesSettings(
             news_lookback_hours=96,
             news_max_age_hours_for_classify=72,
@@ -446,7 +451,7 @@ async def test_scanner_classifier_filters_stale_fetched_news() -> None:
         category="company",
     )
     settings = Settings(
-        universe=UniverseConfig(float_max=20_000_000),
+        universe=UniverseConfig(float_max=20_000_000, rvol_min=0.0),
         data_sources=DataSourcesSettings(
             news_lookback_hours=96,
             news_max_age_hours_for_classify=72,
@@ -479,7 +484,7 @@ async def test_scanner_keeps_fresh_news_within_classifier_window() -> None:
         category="company",
     )
     base = Settings(
-        universe=UniverseConfig(float_max=20_000_000),
+        universe=UniverseConfig(float_max=20_000_000, rvol_min=0.0),
         data_sources=DataSourcesSettings(
             news_lookback_hours=96,
             news_max_age_hours_for_classify=72,
@@ -604,14 +609,16 @@ async def test_enrichment_failure_does_not_block_watchlist() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enrichment_runs_only_after_filters() -> None:
-    """High-float (dropped) and no-catalyst hits must not consume an IBKR round-trip.
+async def test_enrichment_runs_only_after_float_filter() -> None:
+    """High-float symbols must not consume an IBKR enrichment round-trip.
 
-    Phase 6.11: NOCAT is now dropped from hits entirely (the pre-6.11
-    behaviour surfaced it with ``reasons=["no_catalyst"]`` but didn't
-    enrich it — the invariant here, "enrichment round-trip only for
-    catalyst-bearing symbols", is unchanged and strengthened: NOCAT
-    never reaches enrichment AND never reaches the returned hits.
+    Phase 12.1: enrichment moved BEFORE catalyst classification so the
+    rvol pillar can use ``volume`` as its numerator. The invariant
+    weakened from "only catalyst-survivors get enriched" (Phase 5.3) to
+    "only float-survivors get enriched"; symbols past the float filter
+    pay one IBKR round-trip even if they later fail rvol or catalyst.
+    HIGHF is still pruned cheaply by the float filter; NOCAT now does
+    cost an enrichment call but no LLM spend.
     """
     ibkr = _mock_ibkr(["HIGHF", "NOCAT", "GOODX"])
     ibkr.ib.reqHistoricalDataAsync = AsyncMock(
@@ -626,7 +633,7 @@ async def test_enrichment_runs_only_after_filters() -> None:
             news={
                 "NOCAT": [],  # no catalyst → dropped in Phase 6.11
                 "GOODX": [_news("GOODX tops estimates")],
-                # HIGHF: float filter drops it before news is even fetched
+                # HIGHF: float filter drops it before any enrichment runs
             }
         ),
         settings=_settings(float_max=10_000_000),
@@ -636,10 +643,14 @@ async def test_enrichment_runs_only_after_filters() -> None:
     # HIGHF dropped by float filter, NOCAT dropped by Phase 6.11, GOODX survives.
     symbols = {h.symbol for h in hits}
     assert symbols == {"GOODX"}
-    # Only GOODX triggers enrichment — invariant from Phase 5.3 holds.
-    assert ibkr.ib.reqHistoricalDataAsync.await_count == 1
-    called_contract = ibkr.ib.reqHistoricalDataAsync.await_args.args[0]
-    assert getattr(called_contract, "symbol", None) == "GOODX"
+    # Two enrichment round-trips: NOCAT and GOODX (float-survivors). HIGHF stays free.
+    assert ibkr.ib.reqHistoricalDataAsync.await_count == 2
+    enriched_symbols = {
+        getattr(call.args[0], "symbol", None)
+        for call in ibkr.ib.reqHistoricalDataAsync.await_args_list
+    }
+    assert "HIGHF" not in enriched_symbols
+    assert enriched_symbols == {"NOCAT", "GOODX"}
 
 
 @pytest.mark.asyncio
@@ -767,6 +778,179 @@ async def test_fetch_quote_success_unregisters() -> None:
     )
     await scanner.scan_top_gappers()
     assert len(ibkr.subscriptions) == 0
+
+
+# ---------- Phase 12.1: rvol pillar ---------- #
+
+
+def _float_source_with_avg_volume(
+    yf_map: dict[str, tuple[int | None, int | None]],
+) -> FloatSource:
+    """FloatSource whose yfinance fetcher returns ``(float_shares, avg_daily_volume)``."""
+
+    def fetch(symbol: str) -> tuple[int | None, int | None]:
+        return yf_map.get(symbol, (None, None))
+
+    return FloatSource(finnhub=None, yfinance_fetcher=fetch)
+
+
+@pytest.mark.asyncio
+async def test_rvol_passes_when_above_threshold() -> None:
+    """Symbol with today_vol/avg_vol >= rvol_min qualifies and ScanHit.rvol is populated."""
+    ibkr = _mock_ibkr(["HOTSY"])
+    # Today's session bar carries 600k volume; 10-day avg is 100k → rvol = 6.0.
+    ibkr.ib.reqHistoricalDataAsync = AsyncMock(
+        return_value=[
+            _fake_daily_bar(close=2.0, volume=80_000),
+            _fake_daily_bar(close=2.5, volume=600_000),
+        ]
+    )
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={"HOTSY": [_news("HOTSY tops estimates")]}),
+        settings=_settings(rvol_min=5.0),
+        float_source=_float_source_with_avg_volume({"HOTSY": (5_000_000, 100_000)}),
+    )
+    hits = await scanner.scan_top_gappers()
+    assert len(hits) == 1
+    assert hits[0].rvol == pytest.approx(6.0)
+    assert hits[0].avg_daily_volume == 100_000
+    assert hits[0].volume == 600_000
+
+
+@pytest.mark.asyncio
+async def test_rvol_drops_when_below_threshold() -> None:
+    """Symbol below rvol_min must be dropped before catalyst classification runs."""
+    ibkr = _mock_ibkr(["WEAKR"])
+    # 200k today vs 100k avg → rvol = 2.0, below threshold of 5.0.
+    ibkr.ib.reqHistoricalDataAsync = AsyncMock(
+        return_value=[
+            _fake_daily_bar(close=2.0, volume=80_000),
+            _fake_daily_bar(close=2.1, volume=200_000),
+        ]
+    )
+    finnhub = _mock_finnhub(news={"WEAKR": [_news("WEAKR tops estimates")]})
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=finnhub,
+        settings=_settings(rvol_min=5.0),
+        float_source=_float_source_with_avg_volume({"WEAKR": (5_000_000, 100_000)}),
+    )
+    with structlog.testing.capture_logs() as logs:
+        hits = await scanner.scan_top_gappers()
+    assert hits == []
+    drop_events = [row for row in logs if row.get("event") == "scanner.dropped_low_rvol"]
+    assert len(drop_events) == 1
+    assert drop_events[0]["symbol"] == "WEAKR"
+    assert drop_events[0]["rvol"] == pytest.approx(2.0)
+    # Catalyst classifier must never see a rvol-failing symbol.
+    finnhub.company_news.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rvol_drops_when_avg_volume_unknown() -> None:
+    """When yfinance returns no avg_volume, drop the symbol — symmetric with float_unknown."""
+    ibkr = _mock_ibkr(["NOAVG"])
+    ibkr.ib.reqHistoricalDataAsync = AsyncMock(
+        return_value=[
+            _fake_daily_bar(close=2.0, volume=80_000),
+            _fake_daily_bar(close=2.5, volume=600_000),
+        ]
+    )
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={"NOAVG": [_news("NOAVG tops estimates")]}),
+        settings=_settings(rvol_min=5.0),
+        float_source=_float_source_with_avg_volume({"NOAVG": (5_000_000, None)}),
+    )
+    with structlog.testing.capture_logs() as logs:
+        hits = await scanner.scan_top_gappers()
+    assert hits == []
+    drop_events = [row for row in logs if row.get("event") == "scanner.dropped_rvol_unknown"]
+    assert len(drop_events) == 1
+    assert drop_events[0]["symbol"] == "NOAVG"
+    assert drop_events[0]["avg_daily_volume"] is None
+
+
+@pytest.mark.asyncio
+async def test_rvol_drops_when_today_volume_unknown() -> None:
+    """Enrichment timeout/failure → today_volume is None → drop as rvol_unknown."""
+    ibkr = _mock_ibkr(["NOVOL"])
+    ibkr.ib.reqHistoricalDataAsync = AsyncMock(return_value=[])
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={"NOVOL": [_news("NOVOL tops estimates")]}),
+        settings=_settings(rvol_min=5.0),
+        float_source=_float_source_with_avg_volume({"NOVOL": (5_000_000, 100_000)}),
+    )
+    with structlog.testing.capture_logs() as logs:
+        hits = await scanner.scan_top_gappers()
+    assert hits == []
+    drop_events = [row for row in logs if row.get("event") == "scanner.dropped_rvol_unknown"]
+    assert len(drop_events) == 1
+    assert drop_events[0]["today_volume"] is None
+
+
+@pytest.mark.asyncio
+async def test_rvol_pillar_disabled_when_threshold_zero() -> None:
+    """rvol_min=0 → pass-through (legacy/backtest mode); rvol still computed when possible."""
+    ibkr = _mock_ibkr(["BACKT"])
+    ibkr.ib.reqHistoricalDataAsync = AsyncMock(
+        return_value=[
+            _fake_daily_bar(close=2.0, volume=50_000),
+            _fake_daily_bar(close=2.05, volume=150_000),  # rvol = 1.5, below normal threshold
+        ]
+    )
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={"BACKT": [_news("BACKT tops estimates")]}),
+        settings=_settings(rvol_min=0.0),
+        float_source=_float_source_with_avg_volume({"BACKT": (5_000_000, 100_000)}),
+    )
+    hits = await scanner.scan_top_gappers()
+    assert len(hits) == 1
+    # Filter is off but the value is still reported for downstream visibility.
+    assert hits[0].rvol == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
+async def test_rvol_filter_runs_before_llm_catalyst_classifier() -> None:
+    """A rvol-failing symbol must not consume an LLM call, only an IBKR enrichment."""
+    ibkr = _mock_ibkr(["LOWRV"])
+    ibkr.ib.reqHistoricalDataAsync = AsyncMock(
+        return_value=[
+            _fake_daily_bar(close=2.0, volume=80_000),
+            _fake_daily_bar(close=2.1, volume=120_000),  # rvol = 1.2
+        ]
+    )
+    # LLM classifier wired but should NEVER be called.
+    llm_classifier = MagicMock(name="LLMCatalystClassifier")
+    llm_classifier.evaluate = AsyncMock()
+    base = _settings(rvol_min=5.0)
+    settings = base.model_copy(
+        update={
+            "catalyst_classifier": base.catalyst_classifier.model_copy(
+                update={
+                    "llm": base.catalyst_classifier.llm.model_copy(update={"enabled": True}),
+                    "keyword": base.catalyst_classifier.keyword.model_copy(
+                        update={"enabled": False}
+                    ),
+                }
+            )
+        }
+    )
+    finnhub = _mock_finnhub(news={"LOWRV": [_news("LOWRV any headline")]})
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=finnhub,
+        settings=settings,
+        float_source=_float_source_with_avg_volume({"LOWRV": (5_000_000, 100_000)}),
+        llm_classifier=llm_classifier,
+    )
+    hits = await scanner.scan_top_gappers()
+    assert hits == []
+    finnhub.company_news.assert_not_awaited()
+    llm_classifier.evaluate.assert_not_awaited()
 
 
 # ---------- Phase 6.8: manual catalyst override application ---------- #
