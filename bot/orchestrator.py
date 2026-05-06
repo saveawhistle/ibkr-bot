@@ -1010,8 +1010,16 @@ class Orchestrator:
         the active tier string (e.g. ``"REHAB"``) or ``None`` when the
         engine is not wired — lets the CLI print a concise one-line
         session summary.
+
+        When ``risk.rehab.enabled`` is false the entire startup check is
+        skipped: no flag-file read, no ``rehab.state_loaded`` event, no
+        "Rehab tier active" startup notification. The persisted flag is
+        left intact so flipping ``enabled`` back on resumes from the
+        saved tier. Without this gate the CLI was notifying operators
+        that DEEP_REHAB was active even though ``apply_to_caps`` was
+        correctly bypassing the loaded state.
         """
-        if self._rehab is None:
+        if self._rehab is None or not self._rehab.enabled:
             return None
         try:
             self._rehab.load_state()
