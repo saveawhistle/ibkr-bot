@@ -1148,3 +1148,150 @@ def _load_from_path(path: Path) -> Any:
         return load_active_overrides_map(now=now, path=path)
 
     return _loader
+
+
+# ---------- Phase 12.2: yfinance news fallback when Finnhub returns empty ---------- #
+
+
+@pytest.mark.asyncio
+async def test_news_fallback_uses_yfinance_when_finnhub_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finnhub returns []; yfinance fills in; symbol qualifies via the fallback's news.
+
+    This is the ERNA-on-2026-05-06 case: Finnhub free-tier missed a real
+    clinical readout; the classifier silently dropped the symbol; the
+    operator only noticed by hand. Fallback recovers it.
+    """
+    fallback_news = [
+        NewsItem(
+            headline="ERNA tops estimates",
+            source="Yahoo Finance",
+            url="https://example.com/erna",
+            datetime=datetime.now(UTC),
+            summary="",
+            category="yfinance",
+        )
+    ]
+
+    async def stub_yf_news(symbol: str, *, hours_back: int = 96) -> list[NewsItem]:
+        if symbol == "ERNA":
+            return fallback_news
+        return []
+
+    monkeypatch.setattr("bot.scanning.scanner.fetch_yfinance_news", stub_yf_news)
+
+    ibkr = _mock_ibkr(["ERNA"])
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={}),  # Finnhub returns empty for ERNA
+        settings=_settings(),
+        float_source=_float_source({"ERNA": 800_000}),
+    )
+    with structlog.testing.capture_logs() as logs:
+        hits = await scanner.scan_top_gappers()
+    # Symbol qualified — yfinance news triggered earnings_beat keyword classifier.
+    assert {h.symbol for h in hits} == {"ERNA"}
+    fallback_events = [
+        row for row in logs if row.get("event") == "scanner.news_yfinance_fallback_used"
+    ]
+    assert len(fallback_events) == 1
+    assert fallback_events[0]["symbol"] == "ERNA"
+    assert fallback_events[0]["item_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_news_fallback_skipped_when_finnhub_has_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Common case: Finnhub returns news → yfinance fallback is NOT called."""
+    yf_call_count = 0
+
+    async def stub_yf_news(symbol: str, *, hours_back: int = 96) -> list[NewsItem]:
+        nonlocal yf_call_count
+        yf_call_count += 1
+        return []
+
+    monkeypatch.setattr("bot.scanning.scanner.fetch_yfinance_news", stub_yf_news)
+
+    ibkr = _mock_ibkr(["GOOD"])
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={"GOOD": [_news("GOOD tops estimates")]}),
+        settings=_settings(),
+        float_source=_float_source({"GOOD": 5_000_000}),
+    )
+    hits = await scanner.scan_top_gappers()
+    assert {h.symbol for h in hits} == {"GOOD"}
+    assert yf_call_count == 0, "yfinance fallback fired despite Finnhub having news"
+
+
+@pytest.mark.asyncio
+async def test_news_fallback_when_both_empty_drops_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finnhub empty AND yfinance empty → still no_catalyst; no fallback log fires."""
+
+    async def stub_yf_news(symbol: str, *, hours_back: int = 96) -> list[NewsItem]:
+        return []
+
+    monkeypatch.setattr("bot.scanning.scanner.fetch_yfinance_news", stub_yf_news)
+
+    ibkr = _mock_ibkr(["DRY"])
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={}),
+        settings=_settings(),
+        float_source=_float_source({"DRY": 5_000_000}),
+    )
+    with structlog.testing.capture_logs() as logs:
+        hits = await scanner.scan_top_gappers()
+    assert hits == []
+    fallback_events = [
+        row for row in logs if row.get("event") == "scanner.news_yfinance_fallback_used"
+    ]
+    assert fallback_events == []
+    drop_events = [row for row in logs if row.get("event") == "scanner.dropped_no_catalyst"]
+    assert len(drop_events) == 1
+    assert drop_events[0]["symbol"] == "DRY"
+
+
+@pytest.mark.asyncio
+async def test_news_fallback_runs_when_finnhub_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finnhub raising (network blip) is treated identically to empty: fallback fires."""
+    fallback_news = [
+        NewsItem(
+            headline="ERNA tops estimates",
+            source="Yahoo Finance",
+            url="https://example.com/erna",
+            datetime=datetime.now(UTC),
+            summary="",
+            category="yfinance",
+        )
+    ]
+
+    async def stub_yf_news(symbol: str, *, hours_back: int = 96) -> list[NewsItem]:
+        return fallback_news
+
+    monkeypatch.setattr("bot.scanning.scanner.fetch_yfinance_news", stub_yf_news)
+
+    finnhub = MagicMock(name="FinnhubClient")
+    finnhub.company_news = AsyncMock(side_effect=RuntimeError("rate limited"))
+    finnhub.company_profile = AsyncMock(return_value=None)
+
+    ibkr = _mock_ibkr(["ERNA"])
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=finnhub,
+        settings=_settings(),
+        float_source=_float_source({"ERNA": 800_000}),
+    )
+    with structlog.testing.capture_logs() as logs:
+        hits = await scanner.scan_top_gappers()
+    assert {h.symbol for h in hits} == {"ERNA"}
+    # Both events should fire: the primary failure AND the fallback success.
+    events = [row.get("event") for row in logs]
+    assert "scanner.news_failed" in events
+    assert "scanner.news_yfinance_fallback_used" in events

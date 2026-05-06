@@ -202,6 +202,13 @@ class LLMCatalystClassifier:
 
         # 3. Empty news → no catalyst.
         if not news_items:
+            # Emit a structured event so the operator can audit silent
+            # no-news drops without having to grep for the *absence* of
+            # ``catalyst_classifier.evaluation``. ERNA on 2026-05-06 was
+            # dropped this way despite a clinical readout that day —
+            # Finnhub free-tier coverage missed the headline entirely
+            # and we only noticed when AJ flagged it manually.
+            _log.info("catalyst_classifier.no_news", ticker=ticker)
             return ClassificationResult(
                 ticker=ticker,
                 qualifies=False,
