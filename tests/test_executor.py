@@ -129,6 +129,7 @@ def _settings(
     entry_order_type: str = "LMT",
     entry_limit_buffer_usd: float = 0.10,
     initial_stop_adjustable_enabled: bool = True,
+    initial_stop_trail_mode: str = "server_adjustable",
 ) -> Settings:
     """Settings with overrides for account mode and per-trade risk budget.
 
@@ -153,6 +154,7 @@ def _settings(
                 entry_order_type=entry_order_type,  # type: ignore[arg-type]
                 entry_limit_buffer_usd=entry_limit_buffer_usd,
                 initial_stop_adjustable_enabled=initial_stop_adjustable_enabled,
+                initial_stop_trail_mode=initial_stop_trail_mode,  # type: ignore[arg-type]
             ),
             # Existing executor tests use $1 stop widths — loosen the Phase 4c
             # stop-width gate here so only the dedicated risk tests exercise it.
@@ -1825,6 +1827,51 @@ async def test_mkt_entry_stop_carries_adjustable_fields_for_initial_stop_convers
         assert stop.order.adjustedTrailingAmount == pytest.approx(1.5)
         assert stop.order.adjustedStopPrice == pytest.approx(9.5)
         assert stop.order.adjustableTrailingUnit == 0
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_mkt_entry_stop_skips_adjustable_fields_in_bot_driven_mode(tmp_path: Path) -> None:
+    """Phase 7.6 (bot_driven mode): adjustable fields stay unset on the initial STP.
+
+    The ``server_adjustable`` mode encodes ``adjustedOrderType="TRAIL"``,
+    ``triggerPrice``, ``adjustedStopPrice``, ``adjustedTrailingAmount``
+    on the STP at placement so IBKR converts server-side. ``bot_driven``
+    keeps the STP plain — the conversion happens later via
+    ``Executor.plant_initial_trail`` driven by a TradeManager bar-close.
+
+    This test pins the new mode's gating: the same code that adds the
+    fields in server_adjustable mode must be a no-op in bot_driven.
+    Regression for the 2026-05-05 ENVB FIX-PEGGED substitution finding.
+    """
+    ibkr, ib = _fake_ibkr()
+    store = PositionStore()
+    journal = Journal(db_path=tmp_path / "trades.db")
+    try:
+        settings = _settings(
+            entry_order_type="MKT",
+            runner_target_enabled=False,
+            initial_stop_adjustable_enabled=True,  # master switch ON
+            initial_stop_trail_mode="bot_driven",  # but mode skips encoding
+        )
+        executor = _build_executor(
+            ibkr, store, journal, settings=settings, halt_flag_path=tmp_path / "halt.flag"
+        )
+        await executor.handle_signal(_signal())
+
+        from ib_async.util import UNSET_DOUBLE
+
+        _parent, stop = ib.placed
+        assert stop.order.orderType == "STP"
+        # bot_driven mode must leave the same fields unset that
+        # initial_stop_adjustable_enabled=False leaves unset.
+        assert stop.order.triggerPrice == UNSET_DOUBLE, (
+            "bot_driven mode must NOT encode triggerPrice on the initial STP"
+        )
+        assert stop.order.adjustedOrderType == "", (
+            "bot_driven mode must NOT encode adjustedOrderType on the initial STP"
+        )
     finally:
         await journal.close()
 

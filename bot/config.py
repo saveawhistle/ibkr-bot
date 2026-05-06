@@ -177,11 +177,11 @@ class RiskConfig(BaseModel):
     max_concurrent_positions: int = 1
     max_trades_per_day: int = 5
     # Phase 4c — the published quality gates.
-    max_stop_width_usd: float = 0.50  # the methodology: "If I risk 50 cents or more… I try to avoid."
-    max_pct_of_bar_volume: float = 2.0  # the methodology scanner: order ≪ 2–5% of 1-min volume
-    extension_bar_trigger_multiple: float = (
-        2.0  # threshold = max_loss × this (≈ the "$200+" spike)
+    max_stop_width_usd: float = (
+        0.50  # the methodology: "If I risk 50 cents or more… I try to avoid."
     )
+    max_pct_of_bar_volume: float = 2.0  # the methodology scanner: order ≪ 2–5% of 1-min volume
+    extension_bar_trigger_multiple: float = 2.0  # threshold = max_loss × this (≈ the "$200+" spike)
     # Phase 4d — multiple pullback re-entries on the same symbol.
     re_entry: ReEntryConfig = Field(default_factory=ReEntryConfig)
     # Phase 4g — automatic rehab tier (scale-down caps during cold streaks).
@@ -282,18 +282,49 @@ class ExecutionConfig(BaseModel):
     # name through multiple price levels.
     entry_order_type: Literal["LMT", "STP_LMT", "MKT"] = "STP_LMT"
     entry_limit_buffer_usd: float = 0.10
-    # Phase 7.6: server-side adjustable STP on the *initial* bracket stop.
-    # At entry, the full-size protective STP sits at ``signal.stop`` as today.
-    # When the market tags ``signal.entry + initial_stop_trigger_r_multiple × R``
-    # (default +1R), IBKR auto-converts the STP to a TRAIL with
-    # ``initial_stop_trail_r_multiple × R`` trailing distance (default 1.5R).
-    # Zero bot-side code runs at the trigger — it's encoded on the order at
-    # placement time. When the scale-out LMT later fills, the OCA group
-    # cancels this TRAIL and ``_handle_scale_out_lmt_fill`` installs the
-    # tighter post-scale trail per ``post_scaleout_stop_mode``.
+    # Phase 7.6: adjustable STP on the *initial* bracket stop.
+    #
+    # At entry, the full-size protective STP sits at ``signal.stop`` as
+    # today. When the market tags ``signal.entry +
+    # initial_stop_trigger_r_multiple × R`` (default +1R), the STP is
+    # replaced by a TRAIL with ``initial_stop_trail_r_multiple × R``
+    # trailing distance (default 1.5R). When the scale-out LMT later
+    # fills, the OCA group cancels this TRAIL and
+    # ``_handle_scale_out_lmt_fill`` installs the tighter post-scale
+    # trail per ``post_scaleout_stop_mode``.
+    #
+    # ``initial_stop_trail_mode`` selects HOW the conversion happens:
+    #
+    # * ``server_adjustable`` (the original Phase 7.6 wiring) — encodes
+    #   ``adjustedOrderType="TRAIL"`` plus ``triggerPrice``,
+    #   ``adjustedStopPrice``, ``adjustedTrailingAmount`` on the initial
+    #   STP at placement time. IBKR handles the conversion server-side
+    #   when price tags the trigger; zero bot code runs at the moment.
+    #   Robust to brief bot disconnects, but on SCM-class stocks (and
+    #   reportedly on paper / TWS API connections in general) IBKR
+    #   substitutes a ``FIX PEGGED`` order routed through IBKRATS
+    #   instead of a true ``TRAIL`` — the watchdog stops recognising
+    #   the order as protective, fills happen at NBBO-mid instead of
+    #   a deterministic trail price, and observability degrades.
+    #   Reproduced on the 2026-05-05 ENVB session: STP@$3.70 morphed
+    #   into ``SELL FIX PEGGED`` between 10:46:17 and 10:47:51 ET.
+    #
+    # * ``bot_driven`` (the recommended default) — places a plain
+    #   ``STP @ signal.stop`` initially and watches for the trigger
+    #   bar-close in ``TradeManager``. When ``last_close >= entry +
+    #   initial_stop_trigger_r_multiple × R``, the bot cancels the STP
+    #   and places a plain ``TRAIL`` order (same OCA group as the
+    #   scale-out LMT) with ``initial_stop_trail_r_multiple × R``
+    #   trailing distance. Every order is its native type at IBKR;
+    #   FIX PEGGED never appears; watchdog stays accurate. Costs
+    #   ~50 lines of bot-side state vs. the encoded-fields path.
+    #
+    # Defaults to ``bot_driven`` after the 2026-05-05 finding. Set to
+    # ``server_adjustable`` to roll back to the pre-fix behaviour.
     initial_stop_adjustable_enabled: bool = True
     initial_stop_trigger_r_multiple: float = 1.0
     initial_stop_trail_r_multiple: float = 1.5
+    initial_stop_trail_mode: Literal["server_adjustable", "bot_driven"] = "bot_driven"
     # Phase 7.8: the "first red candle close" pre-scale exit. When True,
     # any bar that closes red (close < open) AND below the prior close
     # triggers a full-position market-close BEFORE scale-out. Post-scale
@@ -1074,15 +1105,11 @@ class _ExitL2Config(_ExitEventClassConfig):
     fields stay co-located with the toggle."""
 
     enabled: bool = True
-    bid_offer_pulls: _ExitL2BidOfferPullsConfig = Field(
-        default_factory=_ExitL2BidOfferPullsConfig
-    )
+    bid_offer_pulls: _ExitL2BidOfferPullsConfig = Field(default_factory=_ExitL2BidOfferPullsConfig)
     absorption: _ExitL2AbsorptionConfig = Field(default_factory=_ExitL2AbsorptionConfig)
     spread_events: _ExitL2SpreadConfig = Field(default_factory=_ExitL2SpreadConfig)
     imbalance: _ExitL2ImbalanceConfig = Field(default_factory=_ExitL2ImbalanceConfig)
-    print_clusters: _ExitL2PrintClustersConfig = Field(
-        default_factory=_ExitL2PrintClustersConfig
-    )
+    print_clusters: _ExitL2PrintClustersConfig = Field(default_factory=_ExitL2PrintClustersConfig)
     large_prints: _ExitL2LargePrintsConfig = Field(default_factory=_ExitL2LargePrintsConfig)
 
 
@@ -1333,9 +1360,7 @@ class ExitAdvisorConfig(BaseModel):
     def _validate_positive_cap(cls, value: float) -> float:
         """Reject non-positive caps; a zero/negative cap would always be tripped."""
         if value <= 0.0:
-            raise ValueError(
-                f"exit_advisor cost caps must be > 0.0 USD (got {value})."
-            )
+            raise ValueError(f"exit_advisor cost caps must be > 0.0 USD (got {value}).")
         return value
 
     @field_validator("event_buffer_time_floor_seconds", "event_buffer_hard_floor_seconds")

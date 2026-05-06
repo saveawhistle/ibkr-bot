@@ -44,6 +44,7 @@ from ib_async import (
     Trade,
 )
 
+from bot.brokerage.ibkr_client import ref_req_id
 from bot.config import Settings, get_settings
 from bot.execution.position_state import (
     ExitType,
@@ -1045,6 +1046,13 @@ class Executor:
         exec_cfg = self._settings.execution
         if not exec_cfg.initial_stop_adjustable_enabled:
             return
+        # Phase 7.6 mode gate. ``server_adjustable`` is the original wiring
+        # (encode adjustment fields and let IBKR convert at trigger).
+        # ``bot_driven`` keeps the initial STP plain — the bot watches the
+        # +1R bar-close in TradeManager and cancels/plants the TRAIL itself,
+        # avoiding IBKR's FIX-PEGGED substitution observed on 2026-05-05.
+        if exec_cfg.initial_stop_trail_mode != "server_adjustable":
+            return
         initial_risk = entry - stop_price
         if initial_risk <= 0.0:
             # Defensive: strategies already guard this, but a wider-than-entry
@@ -1379,6 +1387,151 @@ class Executor:
             symbol=position.symbol,
             leg="exit",
             parent_order_id=position.parent_order_id,
+        )
+        return trade
+
+    async def plant_initial_trail(
+        self,
+        *,
+        symbol: str,
+        last_close: float,
+    ) -> Trade | None:
+        """Phase 7.6 (bot_driven mode) — replace the initial STP with a plain TRAIL.
+
+        Called by ``TradeManager.on_bar_update`` once when the bar close
+        crosses ``entry + initial_stop_trigger_r_multiple × R`` and the
+        position has ``initial_trail_planted=False``. Cancels the
+        existing STP, places a plain ``TRAIL`` order in the same OCA
+        group as the scale-out LMT (so a scale-out fill still cancels
+        the trail), and marks the position so the bar-close guard
+        won't re-fire.
+
+        ``last_close`` anchors the TRAIL's initial trigger — IBKR will
+        ratchet it upward as price advances. We seed at
+        ``last_close - trail_amount`` so a same-bar reversal would fire
+        immediately at the configured trail distance below the trigger
+        bar's close (rather than seeding at entry, which would let the
+        trail rest below the trigger and produce slack).
+
+        Returns the new TRAIL ``Trade``, or ``None`` if the position is
+        no longer ``open`` (defensive — a same-bar STP fill could have
+        closed it before this call ran).
+        """
+        position = self._store.get_active(symbol)
+        if position is None or position.status != "open":
+            _log.info(
+                "executor.plant_initial_trail_skipped_inactive",
+                symbol=symbol,
+                status=position.status if position is not None else None,
+            )
+            return None
+        if position.initial_trail_planted:
+            _log.info(
+                "executor.plant_initial_trail_skipped_already_planted",
+                symbol=symbol,
+                stop_order_id=position.stop_order_id,
+            )
+            return None
+
+        try:
+            contract = await self._ibkr.qualify_stock(symbol)
+        except Exception as exc:  # noqa: BLE001 - qualify-stock failures are non-fatal here
+            _log.error(
+                "executor.plant_initial_trail_qualify_failed",
+                symbol=symbol,
+                error=str(exc),
+            )
+            return None
+
+        exec_cfg = self._settings.execution
+        rth_only = exec_cfg.rth_only
+        initial_risk = position.avg_price - position.stop_price
+        if initial_risk <= 0.0:
+            # Defensive: should never happen post-fill on a long but a
+            # widened-stop reconciliation could land here. Skip rather than
+            # plant a TRAIL with an absurd trail amount.
+            _log.warning(
+                "executor.plant_initial_trail_skipped_nonpositive_risk",
+                symbol=symbol,
+                avg_price=position.avg_price,
+                stop_price=position.stop_price,
+            )
+            return None
+        trail_amount = _round_to_tick(initial_risk * exec_cfg.initial_stop_trail_r_multiple)
+        initial_trail_stop = _round_to_tick(last_close - trail_amount)
+
+        # Cancel the existing STP first so OCA bookkeeping on IBKR's side
+        # doesn't see two protective orders briefly. The new TRAIL inherits
+        # the same OCA group as the scale-out LMT (Phase 8.3 fill-anchored
+        # plant uses ``f"scale_{symbol}_{parent_order_id}"``); a TRAIL fill
+        # then cancels the LMT and vice versa, matching the original STP
+        # ↔ scale_lmt OCA semantics.
+        bracket = self._active_trades.get(symbol)
+        if bracket is not None and bracket.stop is not None:
+            self._cancel_trade_silently(bracket.stop)
+
+        oca_group = f"scale_{symbol}_{position.parent_order_id}"
+        trail_order = Order(
+            action="SELL",
+            totalQuantity=position.shares,
+            orderType="TRAIL",
+            auxPrice=trail_amount,
+            trailStopPrice=initial_trail_stop,
+            outsideRth=not rth_only,
+            ocaGroup=oca_group,
+            ocaType=1,  # 1 = cancel remaining block (matches scale-out OCA)
+            transmit=True,
+        )
+        apply_default_tif(trail_order)
+        trade = self._ibkr.ib.placeOrder(contract, trail_order)
+        self._subscribe_commission(
+            trade,
+            symbol=symbol,
+            leg="exit",
+            parent_order_id=position.parent_order_id,
+        )
+
+        # Wire the same fill handler the rest of the bot uses for stops so
+        # a TRAIL fill closes the position correctly (mark_closing → mark_closed
+        # → journal), with sibling cancel disabled because the OCA group already
+        # handles cancelling the scale-out LMT on a TRAIL fill.
+        self._wire_post_scale_stop_handler(symbol, trade)
+
+        # Replace the bracket's stop slot in-place so subsequent code that
+        # reaches for ``bracket.stop`` sees the new TRAIL (not the cancelled STP).
+        if bracket is not None:
+            self._active_trades[symbol] = _BracketTrades(
+                parent=bracket.parent,
+                stop=trade,
+                target=bracket.target,
+                scale_lmt=bracket.scale_lmt,
+            )
+
+        try:
+            self._store.mark_initial_trail_planted(
+                symbol,
+                new_stop_order_id=ref_req_id(trade),
+                new_stop_price=initial_trail_stop,
+            )
+        except Exception as exc:  # noqa: BLE001 - state-mutator errors must not orphan the live TRAIL
+            _log.error(
+                "executor.plant_initial_trail_mark_failed",
+                symbol=symbol,
+                error=str(exc),
+                hint="TRAIL is live on IBKR but in-memory store didn't update; restart or reconcile.",
+            )
+
+        _log.info(
+            "executor.initial_trail_planted",
+            symbol=symbol,
+            mode="bot_driven",
+            shares=position.shares,
+            trail_amount=trail_amount,
+            initial_trail_stop=initial_trail_stop,
+            last_close=last_close,
+            initial_risk=round(initial_risk, 4),
+            trail_r_multiple=exec_cfg.initial_stop_trail_r_multiple,
+            oca_group=oca_group,
         )
         return trade
 

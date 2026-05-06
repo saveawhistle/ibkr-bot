@@ -45,6 +45,12 @@ class _TradeStub:
         self.fills: list[Any] = []
         # Phase 4k: executor's subscribe_commission hooks this on each placed trade.
         self.commissionReportEvent = _StubEvent()
+        # Phase 7.6 bot_driven mode: ``Executor.plant_initial_trail`` calls
+        # ``_wire_post_scale_stop_handler``, which subscribes to filledEvent
+        # so a TRAIL fill closes the position correctly. Stubs that
+        # represent post-scale or trail-replacement orders need this slot
+        # for the wiring not to crash.
+        self.filledEvent = _StubEvent()
         self._done = False
         if not getattr(order, "orderId", 0):
             order.orderId = _TradeStub._next_id
@@ -96,6 +102,7 @@ def _settings(
     *,
     post_scaleout_stop_mode: str = "adjustable_to_trail",
     runner_target_enabled: bool = False,
+    initial_stop_trail_mode: str = "server_adjustable",
 ) -> Settings:
     """Default Settings with Phase 4b risk defaults.
 
@@ -105,6 +112,13 @@ def _settings(
     (Phase 6.14 default in production — overridden here to preserve
     the pre-6.14 test behaviour). ``runner_target_enabled`` opts into
     the Phase 4i runner LMT leg — default off per the methodology.
+
+    ``initial_stop_trail_mode`` defaults to ``"server_adjustable"``
+    here even though production now defaults to ``"bot_driven"`` —
+    pre-existing tests in this file exercise scale-out, trailing, and
+    pre-scale paths that don't want the bot-driven +1R trail plant
+    firing on the same bar. New tests targeting the bot_driven path
+    pass it explicitly.
     """
     base = Settings()
     return base.model_copy(
@@ -115,6 +129,7 @@ def _settings(
                 require_paper_mode=True,
                 post_scaleout_stop_mode=post_scaleout_stop_mode,  # type: ignore[arg-type]
                 runner_target_enabled=runner_target_enabled,
+                initial_stop_trail_mode=initial_stop_trail_mode,  # type: ignore[arg-type]
             ),
             "risk": RiskConfig(),
         }
@@ -162,6 +177,7 @@ def factory(tmp_path: Path):  # type: ignore[no-untyped-def]
         *,
         post_scaleout_stop_mode: str = "adjustable_to_trail",
         runner_target_enabled: bool = False,
+        initial_stop_trail_mode: str = "server_adjustable",
     ) -> tuple[Executor, PositionStore, TradeManager, _FakeIB, Journal]:
         ibkr, ib = _fake_ibkr()
         store = PositionStore()
@@ -169,6 +185,7 @@ def factory(tmp_path: Path):  # type: ignore[no-untyped-def]
         settings = _settings(
             post_scaleout_stop_mode=post_scaleout_stop_mode,
             runner_target_enabled=runner_target_enabled,
+            initial_stop_trail_mode=initial_stop_trail_mode,
         )
         risk_engine = RiskEngine(settings=settings, halt_flag_path=tmp_path / "halt.flag")
         executor = Executor(
@@ -1077,5 +1094,207 @@ async def test_execute_scale_out_short_circuits_if_already_scaled_via_lmt(factor
         assert len(ib.placed) == 0, "short-circuit must prevent any new orders"
         events = [e.get("event") for e in captured]
         assert "trade_manager.scale_out_skipped_already_scaled_via_lmt" in events
+    finally:
+        await journal.close()
+
+
+# ---------- Phase 7.6 bot_driven mode (the +1R STP→TRAIL replacement) ---------- #
+#
+# Regression for the 2026-05-05 ENVB session: ``server_adjustable`` mode (the
+# original Phase 7.6 wiring) had IBKR substitute FIX PEGGED for the post-trigger
+# TRAIL on SCM stocks, leaving the watchdog blind and fills happening at NBBO-
+# midpoint rather than at the configured trail price. ``bot_driven`` mode keeps
+# every order at its native type — these tests pin the mode's behaviour.
+
+
+@pytest.mark.asyncio
+async def test_bot_driven_trail_plants_trail_when_close_crosses_one_r(
+    factory: Any,
+) -> None:
+    """+1R bar-close in bot_driven mode cancels the STP and plants a plain TRAIL.
+
+    Position: entry 10.0, stop 9.0, R = 1.0 → trigger price = 11.0,
+    trail amount = 1.5 (default ``initial_stop_trail_r_multiple``),
+    initial trail stop = last_close − 1.5.
+    """
+    executor, store, tm, ib, journal = await factory(
+        initial_stop_trail_mode="bot_driven", post_scaleout_stop_mode="static_breakeven"
+    )
+    try:
+        position = _build_position()
+        store.insert_reconciled(position)
+        # Existing STP placed; record it on active_trades so plant_initial_trail
+        # has something to cancel (matches the post-fill plant in Phase 8.3).
+        stp_stub = _TradeStub(
+            order=MagicMock(orderId=901, orderType="STP"),
+            contract=MagicMock(symbol="TEST"),
+        )
+        executor.active_trades["TEST"] = _BracketTrades(
+            parent=None, stop=cast("Any", stp_stub), target=None
+        )
+
+        # Bar close at 11.50 — comfortably above +1R = 11.00.
+        bars = _bars([(10.5, 11.6, 10.5, 11.5)])
+        await tm.on_bar_update(position, bars)
+
+        # The STP should be cancelled and exactly one TRAIL placed.
+        assert ib.cancelled, "initial STP must be cancelled before TRAIL plant"
+        assert len(ib.placed) == 1, f"expected one TRAIL placed, got {len(ib.placed)}"
+        trail = ib.placed[0]
+        assert trail.order.orderType == "TRAIL"
+        assert trail.order.auxPrice == pytest.approx(1.5)  # 1.5 × R = 1.5 × 1.0
+        # Initial trail stop seeds at last_close − trail_amount = 11.50 − 1.50 = 10.00.
+        assert trail.order.trailStopPrice == pytest.approx(10.0)
+        # OCA group matches the Phase 8.3 fill-anchored naming so a scale-out
+        # fill on the LMT (sibling) cancels this TRAIL and vice versa.
+        assert trail.order.ocaGroup == f"scale_TEST_{position.parent_order_id}"
+        assert trail.order.ocaType == 1  # cancel-remaining-block
+
+        # Position state flag flipped so the next bar can't re-plant.
+        refreshed = store.get_active("TEST")
+        assert refreshed is not None
+        assert refreshed.initial_trail_planted is True
+        # stop_order_id was rewritten to the new TRAIL's order id.
+        assert refreshed.stop_order_id != 101  # was 101, now should be the TRAIL id
+        # stop_price tracks the new TRAIL's trigger so the watchdog/post-scale
+        # logic see the right value.
+        assert refreshed.stop_price == pytest.approx(10.0)
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_bot_driven_trail_idempotent_after_planted(factory: Any) -> None:
+    """Subsequent bars past +1R must NOT re-place the TRAIL once ``initial_trail_planted=True``."""
+    executor, store, tm, ib, journal = await factory(
+        initial_stop_trail_mode="bot_driven", post_scaleout_stop_mode="static_breakeven"
+    )
+    try:
+        position = _build_position()
+        store.insert_reconciled(position)
+        stp_stub = _TradeStub(
+            order=MagicMock(orderId=901, orderType="STP"),
+            contract=MagicMock(symbol="TEST"),
+        )
+        executor.active_trades["TEST"] = _BracketTrades(
+            parent=None, stop=cast("Any", stp_stub), target=None
+        )
+
+        # First bar: triggers the plant.
+        await tm.on_bar_update(position, _bars([(10.5, 11.6, 10.5, 11.5)]))
+        assert len(ib.placed) == 1
+        first_trail_id = ib.placed[0].order.orderId
+
+        # Second bar even higher — must not place another TRAIL.
+        refreshed = store.get_active("TEST")
+        assert refreshed is not None
+        assert refreshed.initial_trail_planted is True
+        await tm.on_bar_update(refreshed, _bars([(11.5, 11.9, 11.4, 11.8)]))
+        assert len(ib.placed) == 1, "second bar must NOT place a second TRAIL"
+        assert ib.placed[0].order.orderId == first_trail_id  # still the same trade
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_bot_driven_trail_does_not_fire_below_one_r(factory: Any) -> None:
+    """Bar close below +1R is a no-op even in bot_driven mode."""
+    executor, store, tm, ib, journal = await factory(
+        initial_stop_trail_mode="bot_driven", post_scaleout_stop_mode="static_breakeven"
+    )
+    try:
+        position = _build_position()
+        store.insert_reconciled(position)
+        stp_stub = _TradeStub(
+            order=MagicMock(orderId=901, orderType="STP"),
+            contract=MagicMock(symbol="TEST"),
+        )
+        executor.active_trades["TEST"] = _BracketTrades(
+            parent=None, stop=cast("Any", stp_stub), target=None
+        )
+
+        # Bar close at 10.50 — entry + 0.5R, well below the +1R trigger of 11.0.
+        await tm.on_bar_update(position, _bars([(10.0, 10.6, 10.0, 10.5)]))
+
+        assert len(ib.placed) == 0, "no orders should be placed pre-trigger"
+        assert not ib.cancelled, "STP must not be cancelled pre-trigger"
+        refreshed = store.get_active("TEST")
+        assert refreshed is not None
+        assert refreshed.initial_trail_planted is False
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_server_adjustable_mode_skips_bot_driven_plant(factory: Any) -> None:
+    """In ``server_adjustable`` mode, ``_maybe_plant_initial_trail`` is a no-op.
+
+    Even at +1R, the bot doesn't touch the order book — IBKR's own server-side
+    conversion is responsible. Pinned so a future refactor can't accidentally
+    fire both paths.
+    """
+    executor, store, tm, ib, journal = await factory(
+        initial_stop_trail_mode="server_adjustable", post_scaleout_stop_mode="static_breakeven"
+    )
+    try:
+        position = _build_position()
+        store.insert_reconciled(position)
+        stp_stub = _TradeStub(
+            order=MagicMock(orderId=901, orderType="STP"),
+            contract=MagicMock(symbol="TEST"),
+        )
+        executor.active_trades["TEST"] = _BracketTrades(
+            parent=None, stop=cast("Any", stp_stub), target=None
+        )
+
+        # +1R bar — bot_driven would plant; server_adjustable must not.
+        await tm.on_bar_update(position, _bars([(10.5, 11.6, 10.5, 11.5)]))
+
+        # Allowed: scale-out check or pre-scale-red-candle check could fire,
+        # but no TRAIL plant. Filter ib.placed for orderType=="TRAIL".
+        trails = [t for t in ib.placed if t.order.orderType == "TRAIL"]
+        assert trails == [], "server_adjustable mode must not place TRAILs at +1R"
+        refreshed = store.get_active("TEST")
+        assert refreshed is not None
+        assert refreshed.initial_trail_planted is False
+    finally:
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_bot_driven_trail_disabled_when_master_switch_off(
+    factory: Any,
+) -> None:
+    """``initial_stop_adjustable_enabled=False`` is a hard kill switch for both modes."""
+    executor, store, tm, ib, journal = await factory(
+        initial_stop_trail_mode="bot_driven", post_scaleout_stop_mode="static_breakeven"
+    )
+    # Override the disabled flag on top of the bot_driven mode.
+    overridden = tm._settings.model_copy(  # type: ignore[attr-defined]
+        update={
+            "execution": tm._settings.execution.model_copy(  # type: ignore[attr-defined]
+                update={"initial_stop_adjustable_enabled": False}
+            ),
+        }
+    )
+    tm._settings = overridden  # type: ignore[attr-defined]
+    try:
+        position = _build_position()
+        store.insert_reconciled(position)
+        stp_stub = _TradeStub(
+            order=MagicMock(orderId=901, orderType="STP"),
+            contract=MagicMock(symbol="TEST"),
+        )
+        executor.active_trades["TEST"] = _BracketTrades(
+            parent=None, stop=cast("Any", stp_stub), target=None
+        )
+
+        await tm.on_bar_update(position, _bars([(10.5, 11.6, 10.5, 11.5)]))
+
+        trails = [t for t in ib.placed if t.order.orderType == "TRAIL"]
+        assert trails == [], (
+            "initial_stop_adjustable_enabled=False must prevent the bot-driven "
+            "trail plant even when mode is bot_driven"
+        )
     finally:
         await journal.close()

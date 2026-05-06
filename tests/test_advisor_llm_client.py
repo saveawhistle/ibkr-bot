@@ -336,13 +336,19 @@ def test_default_timeout_constant_matches_today_normal_case_latency() -> None:
     assert AnthropicLLMClient.DEFAULT_MAX_RETRIES == 0
 
 
-def test_settings_load_pins_llm_timeout_at_twelve_seconds() -> None:
-    """The shipped ``config.yaml`` must keep ``exit_advisor.llm_timeout_seconds`` at 12.0.
+def test_settings_load_pins_llm_timeout_at_or_above_twelve_seconds() -> None:
+    """The shipped ``config.yaml`` must keep ``exit_advisor.llm_timeout_seconds`` >= 12.0.
 
     Pin the on-disk config value so a future YAML edit doesn't silently revert
-    the bump from the 2026-05-05 CLRB session findings.
+    BELOW the 2026-05-05 CLRB session bump (originally 8.0 → 12.0). Operators
+    are free to raise it above 12.0 (the 2026-05-05 ENVB session showed the
+    operator legitimately tuning it to 30.0); only a regression to <12.0
+    breaks the assertion.
     """
     from bot.config import get_settings
 
     settings = get_settings()
-    assert settings.exit_advisor.llm_timeout_seconds == 12.0
+    assert settings.exit_advisor.llm_timeout_seconds >= 12.0, (
+        f"llm_timeout_seconds must not regress below 12.0; got "
+        f"{settings.exit_advisor.llm_timeout_seconds}. See 2026-05-05 CLRB session."
+    )
