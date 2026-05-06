@@ -304,7 +304,9 @@ class TradeManager:
             closed_idx = -2
             closed_ts = bars.index[closed_idx]
             bar_event = BarFinalizedEvent(
-                timestamp=closed_ts.to_pydatetime() if hasattr(closed_ts, "to_pydatetime") else closed_ts,
+                timestamp=closed_ts.to_pydatetime()
+                if hasattr(closed_ts, "to_pydatetime")
+                else closed_ts,
                 symbol=position.symbol,
                 open=float(bars["open"].iloc[closed_idx]),
                 high=float(bars["high"].iloc[closed_idx]),
@@ -329,6 +331,17 @@ class TradeManager:
                     return
 
         if not position.scaled_out:
+            # Phase 7.6 (bot_driven mode) — replace the initial STP with a
+            # plain TRAIL when the bar close crosses
+            # ``entry + initial_stop_trigger_r_multiple × R``. This is the
+            # opposite of the ``server_adjustable`` mode where IBKR handles
+            # the conversion via encoded fields on the original STP — that
+            # path is silently substituted with FIX PEGGED on SCM stocks
+            # (2026-05-05 ENVB finding). bot_driven keeps every order at
+            # its native type. Idempotent via ``initial_trail_planted``;
+            # short-circuits unconditionally when mode != ``bot_driven``
+            # so the server-side path retains its original behaviour.
+            await self._maybe_plant_initial_trail(position, last_close=last_close)
             # Phase 4i: trigger is the signal-time anchor recorded on the
             # Position (entry + scale_out_multiple × initial_risk, default +2R).
             if last_close >= position.scale_out_price:
@@ -367,6 +380,60 @@ class TradeManager:
         if trigger is not None:
             await self._execute_trailing_exit(
                 position, exit_price=closed_bar_close, trigger=trigger
+            )
+
+    async def _maybe_plant_initial_trail(self, position: Position, *, last_close: float) -> None:
+        """Phase 7.6 (bot_driven mode) — fire ``Executor.plant_initial_trail`` once at +R.
+
+        Short-circuits in three cases (in order):
+
+        1. ``initial_stop_trail_mode`` is not ``"bot_driven"`` —
+           ``server_adjustable`` mode encoded the conversion server-side
+           at placement time and the bot does not observe the trigger.
+        2. ``position.initial_trail_planted`` is already True — the
+           replacement TRAIL was planted on a prior bar close; this
+           bar is post-trigger and should evaluate the runner-trail
+           rules instead.
+        3. The bar close has not yet reached
+           ``position.avg_price + initial_stop_trigger_r_multiple ×
+           initial_risk`` — trigger condition not met. The bot uses
+           ``avg_price`` (the actual fill price) rather than
+           ``signal.entry`` so the trigger reflects what was paid,
+           not the strategy's intended entry. Materially identical
+           on LMT fills at the limit; differs only on fast-market
+           overruns where IBKR fills above the LMT.
+
+        Wraps the executor call in ``try/except`` so a transient
+        IBKR / qualify-stock failure logs and is retried on the next
+        bar (the position is still ``open`` and the guard hasn't
+        flipped, so the next bar's call repeats the attempt).
+        """
+        exec_cfg = self._settings.execution
+        if exec_cfg.initial_stop_trail_mode != "bot_driven":
+            return
+        if position.initial_trail_planted:
+            return
+        if not exec_cfg.initial_stop_adjustable_enabled:
+            # Master kill-switch: if Phase 7.6 is disabled entirely
+            # neither mode does anything. Honour that here too so the
+            # config has a single switch for "no +R trail at all".
+            return
+        initial_risk = position.avg_price - position.stop_price
+        if initial_risk <= 0.0:
+            return
+        trigger_price = position.avg_price + initial_risk * exec_cfg.initial_stop_trigger_r_multiple
+        if last_close < trigger_price:
+            return
+        try:
+            await self._executor.plant_initial_trail(symbol=position.symbol, last_close=last_close)
+        except Exception as exc:  # noqa: BLE001 - never let a TRAIL plant failure crash the bar loop
+            _log.error(
+                "trade_manager.plant_initial_trail_failed",
+                symbol=position.symbol,
+                last_close=last_close,
+                trigger_price=round(trigger_price, 4),
+                error=str(exc),
+                hint="position.initial_trail_planted stays False; next bar retries.",
             )
 
     async def _execute_scale_out(self, position: Position, *, fill_price: float) -> None:

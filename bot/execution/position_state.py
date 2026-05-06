@@ -161,6 +161,13 @@ class Position:
     # cancelled. ``None`` on legacy/reconciled positions where the bar
     # timestamp wasn't recorded — those skip the auto-expire path.
     placement_bar_ts: datetime | None = None
+    # Phase 7.6 (bot_driven mode) — set True when the +1R trigger bar-close
+    # has fired AND the bot has cancelled the initial STP and planted the
+    # plain TRAIL replacement. Idempotence guard so subsequent bars don't
+    # re-place the trail. Always False on the ``server_adjustable`` mode
+    # path because IBKR handles the conversion server-side and the bot
+    # never observes the trigger directly.
+    initial_trail_planted: bool = False
 
 
 @dataclass
@@ -533,6 +540,60 @@ class PositionStore:
             stop_order_id=new_stop_order_id,
         )
         self._positions[symbol] = updated
+        return updated
+
+    def mark_initial_trail_planted(
+        self,
+        symbol: str,
+        *,
+        new_stop_order_id: int,
+        new_stop_price: float,
+    ) -> Position:
+        """Phase 7.6 (bot_driven mode) — record the STP→TRAIL replacement.
+
+        Called by the executor's ``plant_initial_trail`` primitive after
+        the bot has cancelled the initial STP and placed the plain TRAIL
+        in its place. Atomically updates three fields:
+
+        * ``initial_trail_planted=True`` so the TradeManager bar-close
+          guard short-circuits on subsequent bars (idempotence).
+        * ``stop_order_id`` → the new TRAIL's order id; downstream code
+          that hooks ``stream._bar_list.updateEvent`` or queries the
+          working stop now points at the right order.
+        * ``stop_price`` → the TRAIL's initial trigger (≈ trigger −
+          trail_amount). The post-scale-out logic and watchdog read
+          this; updating it here keeps the in-memory view consistent
+          with what's resting on IBKR.
+
+        Status guard: must be ``open``. Refuses double-mark — a second
+        invocation when ``initial_trail_planted`` is already True
+        raises so a logic regression in TradeManager surfaces as a
+        crash, not a silent re-place that orphans the prior TRAIL.
+        """
+        position = self._require(symbol)
+        if position.status != "open":
+            raise InvalidPositionTransitionError(
+                f"mark_initial_trail_planted requires status=open "
+                f"(symbol={symbol}, status={position.status})"
+            )
+        if position.initial_trail_planted:
+            raise InvalidPositionTransitionError(
+                f"mark_initial_trail_planted called twice for {symbol!r}: the "
+                "bot_driven trail trigger should fire exactly once per position."
+            )
+        updated = replace(
+            position,
+            initial_trail_planted=True,
+            stop_order_id=new_stop_order_id,
+            stop_price=new_stop_price,
+        )
+        self._positions[symbol] = updated
+        _log.info(
+            "position.initial_trail_planted",
+            symbol=symbol,
+            new_stop_order_id=new_stop_order_id,
+            new_stop_price=new_stop_price,
+        )
         return updated
 
     def attach_protection_children(
