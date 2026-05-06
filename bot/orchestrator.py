@@ -88,6 +88,7 @@ async def _apply_watchlist_diff(
     position_store: PositionStore | None,
     max_size: int,
     bar_source: str = "ibkr_1min",
+    on_symbol_dropped: Callable[[str], None] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Reconcile ``streams`` with the current scan via one declarative diff; return (added, removed).
 
@@ -156,6 +157,15 @@ async def _apply_watchlist_diff(
         await market_data.unsubscribe(symbol)
         streams.pop(symbol, None)
         _log.info("orchestrator.watchlist_symbol_dropped", symbol=symbol, reason="not_in_scan")
+        if on_symbol_dropped is not None:
+            try:
+                on_symbol_dropped(symbol)
+            except Exception as exc:  # noqa: BLE001 - hook bug must not break diff
+                _log.error(
+                    "orchestrator.on_symbol_dropped_failed",
+                    symbol=symbol,
+                    error=str(exc),
+                )
         removed.append(symbol)
 
     added: list[str] = []
@@ -581,6 +591,12 @@ async def run_strategy_loop(
                         new_hits = []
                     rescan_task = None
                     if new_hits:
+                        # Phase 12: forward watchlist drops to the LLM
+                        # catalyst classifier so a re-entered ticker
+                        # gets fresh evaluation. ``getattr`` shields
+                        # tests that pass a bare-mocked scanner without
+                        # the ``on_watchlist_removal`` method.
+                        on_drop = getattr(scanner, "on_watchlist_removal", None)
                         added, removed = await _apply_watchlist_diff(
                             new_hits,
                             streams=streams,
@@ -588,6 +604,7 @@ async def run_strategy_loop(
                             position_store=position_store,
                             max_size=max_watchlist_size,
                             bar_source=bar_source,
+                            on_symbol_dropped=on_drop,
                         )
                         for symbol in removed:
                             stall_counts.pop(symbol, None)

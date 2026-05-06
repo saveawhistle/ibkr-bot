@@ -963,6 +963,110 @@ class CatalystConfig(BaseModel):
     name_extension: NameExtensionConfig = Field(default_factory=NameExtensionConfig)
 
 
+class CatalystClassifierLLMConfig(BaseModel):
+    """Phase 12 — LLM-driven catalyst classifier knobs.
+
+    All fields validated as positive / in-range. The bootstrap function
+    in :mod:`bot.scanning.llm_catalyst_classifier.bootstrap` reads
+    ``ANTHROPIC_API_KEY`` from ``os.environ`` (after a ``load_dotenv()``
+    call) so the key is never stored here.
+    """
+
+    enabled: bool = True
+    model: str = "claude-sonnet-4-6"
+    timeout_seconds: float = 12.0
+    max_input_tokens: int = 4_000
+    cost_soft_cap_usd_per_day: float = 5.0
+    cost_hard_cap_usd_per_day: float = 25.0
+    self_disable_failure_rate: float = 0.5
+    self_disable_min_calls: int = 5
+    cache_ttl_seconds: int = 1800
+    cache_capacity: int = 200
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _validate_timeout(cls, value: float) -> float:
+        if value <= 0.0:
+            raise ValueError(
+                "catalyst_classifier.llm.timeout_seconds must be > 0.0 "
+                f"(got {value}); a non-positive timeout would abandon every call."
+            )
+        return value
+
+    @field_validator(
+        "max_input_tokens", "cache_ttl_seconds", "cache_capacity", "self_disable_min_calls"
+    )
+    @classmethod
+    def _validate_positive_int(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError(
+                f"catalyst_classifier.llm: positive-int field must be > 0 (got {value})"
+            )
+        return value
+
+    @field_validator("cost_soft_cap_usd_per_day", "cost_hard_cap_usd_per_day")
+    @classmethod
+    def _validate_positive_cap(cls, value: float) -> float:
+        if value <= 0.0:
+            raise ValueError(f"catalyst_classifier.llm: cost caps must be > 0.0 USD (got {value})")
+        return value
+
+    @field_validator("self_disable_failure_rate")
+    @classmethod
+    def _validate_failure_rate(cls, value: float) -> float:
+        if not 0.0 < value <= 1.0:
+            raise ValueError(
+                "catalyst_classifier.llm.self_disable_failure_rate must be in "
+                f"(0.0, 1.0] (got {value})"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_cost_caps_ordered(self) -> CatalystClassifierLLMConfig:
+        if self.cost_soft_cap_usd_per_day >= self.cost_hard_cap_usd_per_day:
+            raise ValueError(
+                "catalyst_classifier.llm.cost_soft_cap_usd_per_day "
+                f"({self.cost_soft_cap_usd_per_day}) must be strictly less than "
+                f"cost_hard_cap_usd_per_day ({self.cost_hard_cap_usd_per_day})."
+            )
+        return self
+
+
+class CatalystClassifierKeywordConfig(BaseModel):
+    """Phase 12 — keyword classifier opt-in flag.
+
+    The pre-Phase-12 keyword classifier in :mod:`bot.scanning.catalyst`
+    stays in the repo and remains the fallback path. ``enabled=False``
+    by default once Phase 12 ships; flip back to True (and the LLM
+    side to False) to roll back to keyword-only operation without a
+    code change.
+    """
+
+    enabled: bool = False
+
+
+class CatalystClassifierConfig(BaseModel):
+    """Phase 12 — top-level container for catalyst classifier mode selection.
+
+    Two sub-blocks: ``llm`` (the new path, default-on) and ``keyword``
+    (the original path, default-off). The scanner inspects the
+    ``enabled`` flags on each:
+
+    * Both enabled → log warning, prefer LLM (LLM wins).
+    * Both disabled → log warning, qualify nothing for that pass.
+    * Only one enabled → use that classifier.
+
+    The two flags being mutually exclusive is the operator's normal
+    config; the warning paths exist to surface misconfiguration
+    rather than fail silently.
+    """
+
+    llm: CatalystClassifierLLMConfig = Field(default_factory=CatalystClassifierLLMConfig)
+    keyword: CatalystClassifierKeywordConfig = Field(
+        default_factory=CatalystClassifierKeywordConfig
+    )
+
+
 class _ExitEventClassConfig(BaseModel):
     """Common shape for an event-class block: a master ``enabled`` flag plus
     free-form per-class fields. Subclasses add the fields specific to that class.
@@ -1564,6 +1668,9 @@ class Settings(BaseSettings):
     testing: TestingConfig = Field(default_factory=TestingConfig)
     watchdog: WatchdogConfig = Field(default_factory=WatchdogConfig)
     catalyst: CatalystConfig = Field(default_factory=CatalystConfig)
+    catalyst_classifier: CatalystClassifierConfig = Field(
+        default_factory=lambda: CatalystClassifierConfig()  # noqa: PLW0108 - default_factory needs zero-arg
+    )
     exit_advisor: ExitAdvisorConfig = Field(default_factory=ExitAdvisorConfig)
     exit_events: ExitEventsConfig = Field(default_factory=ExitEventsConfig)
     exit_gates: ExitGatesConfig = Field(default_factory=ExitGatesConfig)

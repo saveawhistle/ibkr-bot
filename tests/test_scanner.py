@@ -25,8 +25,26 @@ def _fake_scan_row(symbol: str) -> SimpleNamespace:
 
 
 def _settings(float_max: int = 20_000_000) -> Settings:
-    """Build a Settings instance with a known UniverseConfig for assertions."""
-    return Settings(universe=UniverseConfig(float_max=float_max))
+    """Build a Settings instance with a known UniverseConfig for assertions.
+
+    Phase 12: pre-existing scanner tests exercise the keyword classifier
+    path. Force the catalyst-classifier mode resolution to keyword by
+    flipping ``llm.enabled=False`` and ``keyword.enabled=True``. New
+    tests targeting the LLM path opt in explicitly.
+    """
+    base = Settings(universe=UniverseConfig(float_max=float_max))
+    return base.model_copy(
+        update={
+            "catalyst_classifier": base.catalyst_classifier.model_copy(
+                update={
+                    "llm": base.catalyst_classifier.llm.model_copy(update={"enabled": False}),
+                    "keyword": base.catalyst_classifier.keyword.model_copy(
+                        update={"enabled": True}
+                    ),
+                }
+            )
+        }
+    )
 
 
 def _news(headline: str, summary: str = "") -> NewsItem:
@@ -460,12 +478,25 @@ async def test_scanner_keeps_fresh_news_within_classifier_window() -> None:
         summary="",
         category="company",
     )
-    settings = Settings(
+    base = Settings(
         universe=UniverseConfig(float_max=20_000_000),
         data_sources=DataSourcesSettings(
             news_lookback_hours=96,
             news_max_age_hours_for_classify=72,
         ),
+    )
+    # Phase 12: keep this test on the keyword classifier path.
+    settings = base.model_copy(
+        update={
+            "catalyst_classifier": base.catalyst_classifier.model_copy(
+                update={
+                    "llm": base.catalyst_classifier.llm.model_copy(update={"enabled": False}),
+                    "keyword": base.catalyst_classifier.keyword.model_copy(
+                        update={"enabled": True}
+                    ),
+                }
+            )
+        }
     )
     scanner = IBKRScanner(
         ibkr=_mock_ibkr(["ACME"]),
@@ -786,7 +817,9 @@ async def test_scanner_applies_valid_override(tmp_path: Path, monkeypatch: Any) 
         expires_at=datetime.now(UTC) + timedelta(hours=2),
         note="paper-trading test",
     )
-    monkeypatch.setattr("bot.scanning.scanner.load_active_overrides_map", _load_from_path(override_path))
+    monkeypatch.setattr(
+        "bot.scanning.scanner.load_active_overrides_map", _load_from_path(override_path)
+    )
 
     ibkr = _mock_ibkr(["AGPU"])
     finnhub = _mock_finnhub(news={})  # deliberately empty — override must bypass
@@ -817,7 +850,9 @@ async def test_scanner_skips_expired_override(tmp_path: Path, monkeypatch: Any) 
         expires_at=datetime.now(UTC) - timedelta(hours=1),  # already expired
         injected_at=datetime.now(UTC) - timedelta(hours=3),
     )
-    monkeypatch.setattr("bot.scanning.scanner.load_active_overrides_map", _load_from_path(override_path))
+    monkeypatch.setattr(
+        "bot.scanning.scanner.load_active_overrides_map", _load_from_path(override_path)
+    )
 
     ibkr = _mock_ibkr(["AGPU"])
     finnhub = _mock_finnhub(news={"AGPU": [_news("AGPU signs a new contract with partner")]})
@@ -886,7 +921,9 @@ async def test_manual_override_applied_logged(tmp_path: Path, monkeypatch: Any) 
         expires_at=datetime.now(UTC) + timedelta(hours=2),
         note="operator saw FDA headline",
     )
-    monkeypatch.setattr("bot.scanning.scanner.load_active_overrides_map", _load_from_path(override_path))
+    monkeypatch.setattr(
+        "bot.scanning.scanner.load_active_overrides_map", _load_from_path(override_path)
+    )
 
     ibkr = _mock_ibkr(["AGPU"])
     scanner = IBKRScanner(
