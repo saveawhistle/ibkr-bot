@@ -33,6 +33,7 @@ from bot.scanning.llm_catalyst_classifier import (
     ClassificationResult,
     LLMCatalystClassifier,
 )
+from bot.scanning.yfinance_news import fetch_yfinance_news
 
 _ENRICHMENT_TIMEOUT_SECONDS_DEFAULT = 2.0
 """Per-symbol IBKR market-data timeout. 2s × 10-15 symbols parallelized stays
@@ -481,16 +482,41 @@ class IBKRScanner:
             self._name_token_cache.populate(symbol, longname)
 
     async def _fetch_news(self, symbols: list[str]) -> dict[str, list[NewsItem]]:
-        """Fetch Finnhub news for all surviving symbols concurrently."""
+        """Fetch news for all surviving symbols concurrently.
 
+        Finnhub is the primary source. When Finnhub returns an empty list
+        (HTTP 200 with no items — typical for small-cap biotechs and
+        recently-listed Chinese tickers on the free tier), we fall back
+        to yfinance's news endpoint sequentially per affected symbol.
+
+        ERNA on 2026-05-06 was the trigger: a clinical readout published
+        that day was missed by Finnhub's free-tier ``/company-news``,
+        the classifier silently short-circuited on ``no_news``, and the
+        symbol was dropped without an LLM call. yfinance.news catches
+        most of these gaps without a paid API key. The fallback is
+        sequential rather than parallel-then-merge so we don't double
+        the API load on the common case where Finnhub has coverage.
+        """
         lookback_hours = self._settings.data_sources.news_lookback_hours
 
         async def one(symbol: str) -> tuple[str, list[NewsItem]]:
             try:
-                return symbol, await self._finnhub.company_news(symbol, hours_back=lookback_hours)
+                primary = await self._finnhub.company_news(
+                    symbol, hours_back=lookback_hours
+                )
             except Exception as exc:  # noqa: BLE001 - log + fall back to "no news"
                 _log.warning("scanner.news_failed", symbol=symbol, error=str(exc))
-                return symbol, []
+                primary = []
+            if primary:
+                return symbol, primary
+            fallback = await fetch_yfinance_news(symbol, hours_back=lookback_hours)
+            if fallback:
+                _log.info(
+                    "scanner.news_yfinance_fallback_used",
+                    symbol=symbol,
+                    item_count=len(fallback),
+                )
+            return symbol, fallback
 
         results = await asyncio.gather(*(one(s) for s in symbols))
         return dict(results)

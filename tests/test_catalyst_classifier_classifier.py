@@ -128,6 +128,20 @@ async def test_empty_news_returns_no_news_without_calling_llm() -> None:
     assert llm.calls_seen == []
 
 
+@pytest.mark.asyncio
+async def test_empty_news_emits_structured_event() -> None:
+    """Silent no-news drops must surface as a log event for operator audit."""
+    from structlog.testing import capture_logs
+
+    llm = _FakeLLMClient(queued=[_success_result()])
+    classifier = _make_classifier(llm)
+    with capture_logs() as captured:
+        await classifier.classify("ERNA", news_items=[])
+    no_news_events = [e for e in captured if e.get("event") == "catalyst_classifier.no_news"]
+    assert len(no_news_events) == 1
+    assert no_news_events[0]["ticker"] == "ERNA"
+
+
 # ---------------- success / cache integration ---------------- #
 
 
