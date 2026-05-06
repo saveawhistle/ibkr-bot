@@ -1769,3 +1769,112 @@ async def test_apply_watchlist_diff_hook_failure_does_not_break_diff() -> None:
     assert added == ["C"]
     events = [e.get("event") for e in captured]
     assert "orchestrator.on_symbol_dropped_failed" in events
+
+
+# ---------- Phase 4g.1: rehab.enabled=false must short-circuit startup check ---------- #
+
+
+@pytest.mark.asyncio
+async def test_session_start_rehab_check_skips_load_when_disabled(
+    tmp_path: object,
+) -> None:
+    """``rehab.enabled=false`` must skip flag-file load + startup notification.
+
+    Pre-fix: the orchestrator unconditionally called ``load_state()`` and
+    notified the operator that REHAB/DEEP_REHAB was active even though
+    ``apply_to_caps`` correctly bypassed the loaded state. Operator saw
+    "Rehab tier active" with scaled-down caps that weren't actually
+    applied — pure observability/perception bug.
+    """
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock
+
+    from structlog.testing import capture_logs
+
+    from bot.config import RehabConfig, RiskConfig, Settings
+    from bot.orchestrator import Orchestrator
+    from bot.risk.rehab import RehabEngine, RehabRecord, RehabTier, write_rehab_flag
+
+    # Persist a non-NORMAL flag so we can prove it's NOT being loaded.
+    flag_path = Path(cast("Any", tmp_path)) / "rehab.flag"
+    write_rehab_flag(
+        flag_path,
+        RehabRecord(
+            tier=RehabTier.DEEP_REHAB,
+            trigger_reason="consecutive_red_days",
+            entered_at=datetime.now(UTC),
+            drawdown_at_entry_usd=-100.0,
+            consecutive_red_days_at_entry=4,
+        ),
+    )
+
+    settings = Settings(risk=RiskConfig(rehab=RehabConfig(enabled=False)))
+    rehab_engine = RehabEngine(settings=settings, journal=None, flag_path=flag_path)
+    orchestrator = Orchestrator(
+        executor=cast("Any", MagicMock()),
+        store=cast("Any", MagicMock()),
+        settings=settings,
+        auto_flatten=cast("Any", MagicMock()),
+        rehab_engine=rehab_engine,
+        notifier=cast("Any", MagicMock(send_rehab_tier_change=AsyncMock())),
+    )
+
+    with capture_logs() as captured:
+        result = await orchestrator._session_start_rehab_check()
+
+    assert result is None
+    # The flag file's DEEP_REHAB tier must NOT be loaded into memory.
+    assert rehab_engine.state.tier is RehabTier.NORMAL
+    # No rehab.state_loaded event in the JSONL when disabled.
+    events = [e.get("event") for e in captured]
+    assert "rehab.state_loaded" not in events
+
+
+@pytest.mark.asyncio
+async def test_session_start_rehab_check_loads_flag_when_enabled(
+    tmp_path: object,
+) -> None:
+    """Sanity: when enabled, the persisted flag IS read and ``rehab.state_loaded`` fires."""
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock
+
+    from structlog.testing import capture_logs
+
+    from bot.config import RehabConfig, RiskConfig, Settings
+    from bot.orchestrator import Orchestrator
+    from bot.risk.rehab import RehabEngine, RehabRecord, RehabTier, write_rehab_flag
+
+    flag_path = Path(cast("Any", tmp_path)) / "rehab.flag"
+    write_rehab_flag(
+        flag_path,
+        RehabRecord(
+            tier=RehabTier.REHAB,
+            trigger_reason="consecutive_red_days",
+            entered_at=datetime.now(UTC),
+            drawdown_at_entry_usd=-50.0,
+            consecutive_red_days_at_entry=2,
+        ),
+    )
+
+    settings = Settings(risk=RiskConfig(rehab=RehabConfig(enabled=True)))
+    rehab_engine = RehabEngine(settings=settings, journal=None, flag_path=flag_path)
+    orchestrator = Orchestrator(
+        executor=cast("Any", MagicMock()),
+        store=cast("Any", MagicMock()),
+        settings=settings,
+        auto_flatten=cast("Any", MagicMock()),
+        rehab_engine=rehab_engine,
+        notifier=cast("Any", MagicMock(send_rehab_tier_change=AsyncMock())),
+    )
+
+    with capture_logs() as captured:
+        result = await orchestrator._session_start_rehab_check()
+
+    # Flag was read off disk regardless of any post-load tier transition.
+    events = [e.get("event") for e in captured]
+    assert "rehab.state_loaded" in events
+    # Result is whatever tier the engine settled on after check_transitions
+    # (with no journal entries the empty-stats path may downgrade to NORMAL);
+    # the contract under test is simply "non-None when enabled, signalling
+    # the CLI to print the rehab summary".
+    assert result is not None
