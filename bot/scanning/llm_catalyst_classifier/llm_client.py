@@ -13,6 +13,7 @@ tokens) — same as the exit advisor.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -298,7 +299,15 @@ def _build_classification(args: Any) -> CatalystClassification:
         raise ValueError(f"reasoning must be a string; got {type(reasoning_raw).__name__}")
 
     concerns_raw = args.get("concerns", [])
-    if not isinstance(concerns_raw, list):
+    # Sonnet 4.6 occasionally returns ``concerns`` as a bare string (or
+    # comma/semicolon-delimited string) despite the input_schema declaring
+    # ``type: array``. Coerce these shapes rather than dropping the whole
+    # classification — see the 2026-05-06 ELPW/BIYA failures.
+    if concerns_raw is None:
+        concerns_raw = []
+    elif isinstance(concerns_raw, str):
+        concerns_raw = [s.strip() for s in re.split(r"[,;]", concerns_raw) if s.strip()]
+    elif not isinstance(concerns_raw, list):
         raise ValueError(f"concerns must be a list; got {type(concerns_raw).__name__}")
     concerns: list[str] = []
     for entry in concerns_raw:
