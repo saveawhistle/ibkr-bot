@@ -112,3 +112,49 @@ async def test_yfinance_non_numeric_value_falls_back() -> None:
     assert data is not None
     assert data.source == SOURCE_FINNHUB_FALLBACK
     assert data.float_shares == 2_000_000
+
+
+@pytest.mark.asyncio
+async def test_yfinance_legacy_int_return_keeps_avg_volume_none() -> None:
+    """Pre-rvol fetcher contract (bare int) must still parse cleanly with avg_daily_volume=None."""
+    yf_fetcher = MagicMock(return_value=4_000_000)
+    source = FloatSource(finnhub=_fake_finnhub(None), yfinance_fetcher=yf_fetcher)
+    data = await source.get_float("LEGACY")
+    assert data is not None
+    assert data.float_shares == 4_000_000
+    assert data.avg_daily_volume is None
+
+
+@pytest.mark.asyncio
+async def test_yfinance_tuple_return_populates_avg_daily_volume() -> None:
+    """Rvol-aware fetcher returns (float, avg_vol) and FloatData carries both."""
+    yf_fetcher = MagicMock(return_value=(3_500_000, 850_000))
+    source = FloatSource(finnhub=_fake_finnhub(None), yfinance_fetcher=yf_fetcher)
+    data = await source.get_float("RVOL1")
+    assert data is not None
+    assert data.float_shares == 3_500_000
+    assert data.avg_daily_volume == 850_000
+    assert data.source == SOURCE_YFINANCE
+
+
+@pytest.mark.asyncio
+async def test_yfinance_tuple_with_none_avg_volume_still_qualifies_float() -> None:
+    """Float present + avg_volume missing must keep the symbol qualified (rvol filter handles unknown)."""
+    yf_fetcher = MagicMock(return_value=(2_100_000, None))
+    source = FloatSource(finnhub=_fake_finnhub(None), yfinance_fetcher=yf_fetcher)
+    data = await source.get_float("PARTL")
+    assert data is not None
+    assert data.float_shares == 2_100_000
+    assert data.avg_daily_volume is None
+
+
+@pytest.mark.asyncio
+async def test_finnhub_fallback_carries_avg_daily_volume_none() -> None:
+    """Finnhub fallback path doesn't expose avg volume; must populate None, not raise."""
+    yf_fetcher = MagicMock(return_value=(None, None))
+    source = FloatSource(finnhub=_fake_finnhub(8.0), yfinance_fetcher=yf_fetcher)
+    data = await source.get_float("FBACK")
+    assert data is not None
+    assert data.source == SOURCE_FINNHUB_FALLBACK
+    assert data.float_shares == 8_000_000
+    assert data.avg_daily_volume is None

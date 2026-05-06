@@ -44,9 +44,16 @@ def _phase12_settings(
     llm_enabled: bool = True,
     keyword_enabled: bool = False,
     float_max: int = 20_000_000,
+    rvol_min: float = 0.0,
 ) -> Settings:
-    """Build Settings with the requested classifier-mode toggles."""
-    base = Settings(universe=UniverseConfig(float_max=float_max))
+    """Build Settings with the requested classifier-mode toggles.
+
+    ``rvol_min`` defaults to 0.0 (Phase 12.1 rvol pillar disabled) so these
+    classifier-focused tests don't have to wire avg_daily_volume into every
+    fixture. Tests that want to exercise the rvol pillar live in
+    ``test_scanner.py`` and opt in explicitly.
+    """
+    base = Settings(universe=UniverseConfig(float_max=float_max, rvol_min=rvol_min))
     return base.model_copy(
         update={
             "catalyst_classifier": CatalystClassifierConfig(
