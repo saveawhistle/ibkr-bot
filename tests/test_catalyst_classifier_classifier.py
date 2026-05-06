@@ -272,6 +272,102 @@ async def test_self_disable_after_failure_rate_threshold() -> None:
     assert any("self-disabled" in m for m in notifications)
 
 
+# ---------------- transient (Anthropic 529) failures excluded from self-disable ---------------- #
+
+
+def _transient_failure() -> LLMCallResult:
+    """Build a fake transient (HTTP 529 OverloadedError) failure result."""
+    return LLMCallResult(
+        success=False,
+        classification=None,
+        cost_usd=0.0,
+        duration_seconds=0.5,
+        failure_reason="overloaded: Error code: 529",
+        transient=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_transient_failures_alone_never_trigger_self_disable() -> None:
+    """A long Anthropic capacity blip must NOT take the pillar offline for the session."""
+    notifications: list[str] = []
+    llm = _FakeLLMClient(queued=[_transient_failure() for _ in range(10)])
+    classifier = _make_classifier(
+        llm,
+        self_disable_min_calls=3,
+        self_disable_failure_rate=0.5,
+        notify_callback=notifications.append,
+    )
+    # 10 consecutive 529s — every scan in a 50-min Anthropic outage.
+    for i in range(10):
+        await classifier.classify(f"SYM{i}", news_items=[_news(f"h{i}")])
+    assert not classifier.is_self_disabled()
+    assert notifications == []
+
+
+@pytest.mark.asyncio
+async def test_transient_failures_dilute_real_failure_rate_correctly() -> None:
+    """Mixed transient + real failures: rate is computed only over non-transient calls.
+
+    5 transient + 3 real failures should NOT count as 8/8=100%; it should
+    count as 3/3=100% over the non-transient pool. With min_calls=3 that
+    still trips self-disable, which is the intended behaviour: real
+    failures are real failures regardless of how many 529s sit alongside.
+    """
+    queued = [_transient_failure() for _ in range(5)] + [_failure_result() for _ in range(3)]
+    llm = _FakeLLMClient(queued=queued)
+    classifier = _make_classifier(
+        llm,
+        self_disable_min_calls=3,
+        self_disable_failure_rate=0.5,
+    )
+    for i in range(8):
+        await classifier.classify(f"SYM{i}", news_items=[_news(f"h{i}")])
+    assert classifier.is_self_disabled()
+
+
+@pytest.mark.asyncio
+async def test_transient_failures_dont_dilute_below_threshold() -> None:
+    """Inverse case: 5 transient + 1 real failure must NOT trip self-disable.
+
+    Without the exclusion, original logic would compute 1/6 = 17% < 50% =
+    safe (correct outcome by accident). With exclusion: 1/1 = 100% > 50%
+    BUT total counted calls = 1 < min_calls = 3, so still no disable
+    (correct outcome by design). This test pins the more interesting
+    scenario: 5 transient + 2 real successes -- counted total = 2 <
+    min_calls, no disable.
+    """
+    queued = [_transient_failure() for _ in range(5)] + [
+        _success_result(qualifies=False) for _ in range(2)
+    ]
+    llm = _FakeLLMClient(queued=queued)
+    classifier = _make_classifier(
+        llm,
+        self_disable_min_calls=3,
+        self_disable_failure_rate=0.5,
+    )
+    for i in range(7):
+        await classifier.classify(f"SYM{i}", news_items=[_news(f"h{i}")])
+    assert not classifier.is_self_disabled()
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_logs_with_transient_flag() -> None:
+    """The catalyst_classifier.failure event must carry transient=True for 529s."""
+    from structlog.testing import capture_logs
+
+    llm = _FakeLLMClient(queued=[_transient_failure(), _failure_result()])
+    classifier = _make_classifier(llm)
+    with capture_logs() as captured:
+        await classifier.classify("OCG", news_items=[_news("h1")])
+        await classifier.classify("AAA", news_items=[_news("h2")])
+    failures = [row for row in captured if row.get("event") == "catalyst_classifier.failure"]
+    assert len(failures) == 2
+    by_ticker = {row["ticker"]: row for row in failures}
+    assert by_ticker["OCG"]["transient"] is True
+    assert by_ticker["AAA"]["transient"] is False
+
+
 @pytest.mark.asyncio
 async def test_self_disabled_short_circuits_subsequent_calls() -> None:
     llm = _FakeLLMClient(queued=[_failure_result() for _ in range(20)])

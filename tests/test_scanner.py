@@ -36,6 +36,14 @@ def _settings(float_max: int = 20_000_000, rvol_min: float = 0.0) -> Settings:
     pass-through for legacy tests that don't wire avg_daily_volume.
     Tests targeting the rvol filter opt in by passing rvol_min=5.0
     (or whatever value makes their assertion sharp).
+
+    Hermeticity: force ``testing.allow_catalyst_overrides=False`` so a
+    real ``data/test_catalyst_overrides.json`` on the operator's machine
+    can't bleed into test runs. Tests that DO want overrides go through
+    ``_settings_with_override_flag(allow=True)`` further down. Without
+    this, a recent ERNA override entry combined with the live config
+    leaving the gate open silently bypassed the news fetch and broke
+    ``test_news_fallback_uses_yfinance_when_finnhub_returns_empty``.
     """
     base = Settings(universe=UniverseConfig(float_max=float_max, rvol_min=rvol_min))
     return base.model_copy(
@@ -47,7 +55,8 @@ def _settings(float_max: int = 20_000_000, rvol_min: float = 0.0) -> Settings:
                         update={"enabled": True}
                     ),
                 }
-            )
+            ),
+            "testing": base.testing.model_copy(update={"allow_catalyst_overrides": False}),
         }
     )
 

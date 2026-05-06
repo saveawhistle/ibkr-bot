@@ -270,6 +270,46 @@ def test_unexpected_exception_caught() -> None:
     assert "unexpected_error" in result.failure_reason
 
 
+class _FakeAPIStatusError(anthropic.APIStatusError):
+    """Synthetic APIStatusError that bypasses the SDK constructor's validation.
+
+    The real SDK constructors require an httpx.Response and a parsed body
+    in specific shapes; tests just need the exception's ``status_code``
+    attribute to drive the transient classification. This stub lets us
+    raise either a 529 or a non-529 without standing up an httpx fixture.
+    """
+
+    def __init__(self, status_code: int, message: str = "test") -> None:
+        Exception.__init__(self, message)
+        self.status_code = status_code
+        self.message = message
+
+
+def test_overloaded_error_marked_transient() -> None:
+    """HTTP 529 must produce ``transient=True`` so the classifier excludes it
+    from the self-disable failure-rate counter."""
+    overloaded_exc = _FakeAPIStatusError(status_code=529, message="Overloaded")
+    client, fake = _client_with(raise_exc=overloaded_exc)
+    result = client.call(CATALYST_CLASSIFIER_SYSTEM_PROMPT, "user msg", CLASSIFY_CATALYST_TOOL)
+    assert not result.success
+    assert result.transient is True
+    assert result.failure_reason is not None
+    assert result.failure_reason.startswith("overloaded:")
+    # max_retries=0 contract: only ONE attempt; the catalyst rescan does the retry.
+    assert fake.call_count == 1
+
+
+def test_non_529_api_status_error_not_transient() -> None:
+    """A 400/401/etc must keep ``transient=False`` -- those are real bugs."""
+    bad_request_exc = _FakeAPIStatusError(status_code=400, message="bad request")
+    client, _ = _client_with(raise_exc=bad_request_exc)
+    result = client.call(CATALYST_CLASSIFIER_SYSTEM_PROMPT, "user msg", CLASSIFY_CATALYST_TOOL)
+    assert not result.success
+    assert result.transient is False
+    assert result.failure_reason is not None
+    assert result.failure_reason.startswith("api_error:")
+
+
 # ---------------- helpers ---------------- #
 
 
