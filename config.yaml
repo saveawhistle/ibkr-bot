@@ -134,6 +134,30 @@ logging:
   json: true                           # JSONRenderer to stdout + file; false falls back to the dev ConsoleRenderer
   path: "logs/"                        # session files land at {path}/session_{YYYY-MM-DD}.jsonl in NY date; null disables file logging
 
+# --- Phase 12 LLM-driven catalyst classifier ---
+# Replaces the keyword classifier in bot/scanning/catalyst.py. The keyword
+# classifier remains in the repo, gated by catalyst_classifier.keyword.enabled
+# below; flip the flags to roll back without code changes. Only one mode
+# should be enabled at a time — both-on logs a warning and prefers LLM,
+# both-off logs a warning and qualifies nothing.
+#
+# ANTHROPIC_API_KEY is read from .env at bootstrap (same mechanism as the
+# Phase 11 exit advisor); never put it here.
+catalyst_classifier:
+  llm:
+    enabled: true                            # Phase 12 default: LLM is on
+    model: "claude-sonnet-4-6"               # pinned model; bump deliberately
+    timeout_seconds: 12.0                    # per-ticker LLM call timeout (max_retries=0 — see llm_client.py)
+    max_input_tokens: 4000                   # ceiling on prompt size; oldest headlines truncate when exceeded
+    cost_soft_cap_usd_per_day: 5.0           # one-time daily warning when crossed
+    cost_hard_cap_usd_per_day: 25.0          # classifier returns deterministic non-qualify until NY-midnight rollover
+    self_disable_failure_rate: 0.5           # >50% failure rate over min_calls trips self-disable for the session
+    self_disable_min_calls: 5                # need at least this many calls before failure rate is meaningful
+    cache_ttl_seconds: 1800                  # 30 min — repeated identical news within window short-circuits to cached result
+    cache_capacity: 200                      # LRU eviction past this entry count
+  keyword:
+    enabled: false                           # Phase 12 default: keyword path is the rollback fallback
+
 # --- Phase 11 exit advisor hook (DISABLED ON PRODUCTION MAIN) ---
 # The hook is the integration point for external advisor implementations
 # (initially the spike branch's exit advisor). With ``enabled: false``,
@@ -150,7 +174,7 @@ exit_advisor:
   # ANTHROPIC_API_KEY is read from the environment at bootstrap; never put it here.
   llm_model: "claude-sonnet-4-6"          # pinned model; bump deliberately when validating a new release
   llm_max_tokens: 1024                     # output cap; tool-use response + reasoning fits comfortably under this
-  llm_timeout_seconds: 12.0                # LLM-side timeout. Bumped from 8.0 → 12.0 after the 2026-05-05 CLRB session showed normal-case Sonnet 4.6 latencies of 6.4s and 7.8s — too close to the old ceiling, tipped over on a 90s API blip and tripped self-disable. 12.0 leaves ~50% headroom over observed normal latency; combined with max_retries=0 in llm_client.py the advisor now waits at most 12s per call (was ~25s with SDK auto-retry). The outer hook timeout (timeout_seconds above, 10s) is no longer wider than this — when the bump goes live, also widen timeout_seconds if you want the hook to be a true safety net, otherwise the hook's worker-thread cancel will fire first.
+  llm_timeout_seconds: 30.0                # LLM-side timeout. Bumped from 8.0 → 12.0 after the 2026-05-05 CLRB session showed normal-case Sonnet 4.6 latencies of 6.4s and 7.8s — too close to the old ceiling, tipped over on a 90s API blip and tripped self-disable. 12.0 leaves ~50% headroom over observed normal latency; combined with max_retries=0 in llm_client.py the advisor now waits at most 12s per call (was ~25s with SDK auto-retry). The outer hook timeout (timeout_seconds above, 10s) is no longer wider than this — when the bump goes live, also widen timeout_seconds if you want the hook to be a true safety net, otherwise the hook's worker-thread cancel will fire first.
   cost_soft_cap_usd: 10.0                  # one-time Telegram warning at this cumulative session spend
   cost_hard_cap_usd: 50.0                  # advisor stops calling the LLM and returns deterministic 'hold' past this
   event_buffer_time_floor_seconds: 30.0    # bar/MA-cross events trigger only after this many seconds since last LLM call

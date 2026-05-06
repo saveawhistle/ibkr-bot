@@ -28,6 +28,10 @@ from bot.scanning.catalyst import NameTokenCache, classify
 from bot.scanning.catalyst_overrides import CatalystOverride, load_active_overrides_map
 from bot.scanning.finnhub_client import FinnhubClient, NewsItem
 from bot.scanning.float_source import FloatData, FloatSource
+from bot.scanning.llm_catalyst_classifier import (
+    ClassificationResult,
+    LLMCatalystClassifier,
+)
 
 _ENRICHMENT_TIMEOUT_SECONDS_DEFAULT = 2.0
 """Per-symbol IBKR market-data timeout. 2s × 10-15 symbols parallelized stays
@@ -68,6 +72,7 @@ class IBKRScanner:
         float_source: FloatSource | None = None,
         enrichment_timeout_seconds: float = _ENRICHMENT_TIMEOUT_SECONDS_DEFAULT,
         name_token_cache: NameTokenCache | None = None,
+        llm_classifier: LLMCatalystClassifier | None = None,
     ) -> None:
         """Wire an ``IBKRClient``, ``FinnhubClient``, and ``FloatSource`` together.
 
@@ -80,6 +85,15 @@ class IBKRScanner:
         attribution gate's name-extension fallback. Tests can pass an
         explicit cache (or ``None`` to disable name extension entirely
         — useful for pre-10.5 regression tests).
+
+        Phase 12 ``llm_classifier`` is the LLM-driven catalyst classifier
+        constructed via ``bootstrap_catalyst_classifier``. When ``None``
+        AND ``settings.catalyst_classifier.llm.enabled=True``, the
+        scanner logs a warning and silently falls back to the keyword
+        classifier — defence in depth so a missing API key (or bootstrap
+        failure) doesn't crash the scanner. When ``llm_classifier`` is
+        provided AND the LLM mode is enabled, news fetch + classification
+        run in parallel via ``asyncio.gather`` for the surviving symbols.
         """
         self._ibkr = ibkr
         self._finnhub = finnhub
@@ -91,6 +105,78 @@ class IBKRScanner:
             if name_token_cache is not None
             else NameTokenCache.from_settings(self._settings)
         )
+        self._llm_classifier = llm_classifier
+        # Cache the resolved classifier mode for one scan pass — the result is
+        # logged once on first use rather than per-symbol so the JSONL stays
+        # readable.
+        self._classifier_mode_logged = False
+
+    # ------------------------------------------------------------------
+    # Phase 12 public hooks
+    # ------------------------------------------------------------------
+
+    @property
+    def llm_classifier(self) -> LLMCatalystClassifier | None:
+        """Return the bound LLM classifier (or ``None`` when keyword path active)."""
+        return self._llm_classifier
+
+    def on_watchlist_removal(self, ticker: str) -> None:
+        """Forward to the LLM classifier so a re-entered ticker re-evaluates fresh.
+
+        Idempotent — the classifier itself short-circuits when the ticker
+        was never qualified. The orchestrator calls this from
+        ``_apply_watchlist_diff`` whenever a symbol drops off the
+        watchlist, regardless of cause (rescan churn, position closed,
+        end-of-day).
+        """
+        if self._llm_classifier is None:
+            return
+        self._llm_classifier.on_watchlist_removal(ticker)
+
+    def _resolve_classifier_mode(self) -> str:
+        """Decide which classifier path runs this scan and warn on misconfig.
+
+        Returns one of ``"llm"``, ``"keyword"``, or ``"none"``. Only emits
+        the resolution log once per ``IBKRScanner`` lifetime so a long
+        session doesn't repeat-spam.
+        """
+        cfg = self._settings.catalyst_classifier
+        llm_on = cfg.llm.enabled and self._llm_classifier is not None
+        keyword_on = cfg.keyword.enabled
+        # Warn when LLM is configured-on but bootstrap returned None
+        # (missing API key, construction failed). This happens once per
+        # session and tells the operator the scanner silently degraded.
+        bootstrap_missing = cfg.llm.enabled and self._llm_classifier is None
+        if not self._classifier_mode_logged:
+            if bootstrap_missing:
+                _log.warning(
+                    "scanner.classifier_llm_bootstrap_missing",
+                    hint=(
+                        "catalyst_classifier.llm.enabled=true but no "
+                        "LLMCatalystClassifier was wired. Falling back to "
+                        "keyword classifier if its enabled=true; otherwise "
+                        "no catalyst evaluation runs."
+                    ),
+                )
+            if llm_on and keyword_on:
+                _log.warning(
+                    "scanner.classifier_both_modes_enabled",
+                    hint="catalyst_classifier.llm + keyword both enabled; preferring LLM.",
+                )
+            if not llm_on and not keyword_on:
+                _log.warning(
+                    "scanner.classifier_no_mode_enabled",
+                    hint=(
+                        "Both catalyst_classifier.llm and .keyword are off; "
+                        "the scanner will qualify nothing this pass."
+                    ),
+                )
+            self._classifier_mode_logged = True
+        if llm_on:
+            return "llm"
+        if keyword_on:
+            return "keyword"
+        return "none"
 
     async def scan_top_gappers(self) -> list[ScanHit]:
         """Run the scan and return the ranked morning watchlist as ``ScanHit`` rows.
@@ -102,6 +188,14 @@ class IBKRScanner:
         and inherit the injected category as their catalyst; everything
         downstream (ScanHit, strategy evaluation, executor) runs
         identically to an organically-classified hit.
+
+        Phase 12: catalyst evaluation runs as the LAST gating step
+        (after price/change/volume/float). When
+        ``catalyst_classifier.llm.enabled=true`` AND a classifier was
+        wired (bootstrap succeeded), per-ticker news fetch +
+        classification run concurrently via ``asyncio.gather``. The
+        keyword classifier remains as a fallback when the LLM path is
+        disabled OR the bootstrap returned ``None``.
         """
         contracts = await self._fetch_ibkr_gappers()
         if not contracts:
@@ -123,12 +217,26 @@ class IBKRScanner:
         # warning log); the cache treats empty as "no name extension
         # available, fall back to ticker-only matching".
         await self._populate_name_token_cache(symbols_needing_news)
+        # Phase 12 — when the LLM path is active, classify all
+        # surviving non-overridden symbols concurrently. Override
+        # symbols skip the classifier entirely (their ``catalyst``
+        # comes straight from the override dict). The map carries
+        # ``None`` for tickers whose evaluation didn't qualify.
+        mode = self._resolve_classifier_mode()
+        llm_results: dict[str, ClassificationResult] = {}
+        if mode == "llm":
+            llm_results = await self._classify_via_llm(
+                symbols=symbols_needing_news,
+                news_map=news_map,
+            )
         raw_hits = [
             self._build_hit(
                 c,
                 floats.get(c.symbol),
                 news_map.get(c.symbol, []),
                 override=overrides.get(c.symbol),
+                llm_result=llm_results.get(c.symbol),
+                mode=mode,
             )
             for c in survivors
         ]
@@ -280,9 +388,7 @@ class IBKRScanner:
             try:
                 return symbol, await self._ibkr.get_longname(symbol)
             except Exception as exc:  # noqa: BLE001 - degrade to no-name
-                _log.warning(
-                    "scanner.longname_fetch_failed", symbol=symbol, error=str(exc)
-                )
+                _log.warning("scanner.longname_fetch_failed", symbol=symbol, error=str(exc))
                 return symbol, ""
 
         results = await asyncio.gather(*(_one(s) for s in symbols))
@@ -304,6 +410,52 @@ class IBKRScanner:
         results = await asyncio.gather(*(one(s) for s in symbols))
         return dict(results)
 
+    async def _classify_via_llm(
+        self,
+        *,
+        symbols: list[str],
+        news_map: dict[str, list[NewsItem]],
+    ) -> dict[str, ClassificationResult]:
+        """Phase 12 — classify every surviving non-overridden ticker in parallel.
+
+        One ``asyncio.gather`` over per-ticker tasks. Each task wraps a
+        single ``LLMCatalystClassifier.classify`` call. Failures inside
+        ``classify`` are reported via the result's ``failure_reason``
+        rather than raising, so one ticker's failure doesn't fail the
+        batch. Returns ``{symbol: ClassificationResult}`` covering every
+        input symbol.
+        """
+        classifier = self._llm_classifier
+        if classifier is None:
+            # Resolved mode said llm but classifier isn't wired — defensive,
+            # the resolver should have logged the warning already.
+            return {}
+
+        async def _one(symbol: str) -> tuple[str, ClassificationResult]:
+            try:
+                result = await classifier.classify(
+                    symbol,
+                    news_map.get(symbol, []),
+                )
+            except Exception as exc:  # noqa: BLE001 - one ticker's bug must not fail the batch
+                _log.error(
+                    "scanner.classifier_call_unexpected_error",
+                    symbol=symbol,
+                    error=str(exc),
+                )
+                result = ClassificationResult(
+                    ticker=symbol,
+                    qualifies=False,
+                    reason="classifier_unexpected_error",
+                    failure_reason=str(exc),
+                )
+            return symbol, result
+
+        if not symbols:
+            return {}
+        gathered = await asyncio.gather(*(_one(s) for s in symbols))
+        return dict(gathered)
+
     def _build_hit(
         self,
         contract: Contract,
@@ -311,6 +463,8 @@ class IBKRScanner:
         news_items: list[NewsItem],
         *,
         override: CatalystOverride | None = None,
+        llm_result: ClassificationResult | None = None,
+        mode: str = "keyword",
     ) -> ScanHit:
         """Assemble a single ``ScanHit`` with catalyst classified and reasons populated.
 
@@ -319,6 +473,13 @@ class IBKRScanner:
         catalyst and a dedicated ``catalyst.manual_override_applied``
         event fires so post-session review can distinguish organic
         classifier matches from operator injections.
+
+        Phase 12: when ``mode == "llm"`` AND the classifier produced a
+        ``llm_result`` for this symbol, the hit's catalyst category
+        comes from the LLM (via ``ClassificationResult.classification``)
+        rather than the keyword classifier. ``mode == "none"`` (both
+        flags off) leaves catalyst as ``None`` so the no-catalyst drop
+        filter dispatches normally.
         """
         float_shares = float_data.float_shares if float_data is not None else None
         float_source = float_data.source if float_data is not None else None
@@ -333,7 +494,12 @@ class IBKRScanner:
                 injected_at=override.injected_at.isoformat(),
                 injected_by=override.injected_by,
             )
-        else:
+        elif mode == "llm" and llm_result is not None:
+            if llm_result.qualifies and llm_result.classification is not None:
+                catalyst = llm_result.classification.category
+            else:
+                catalyst = None
+        elif mode == "keyword":
             catalyst = (
                 classify(
                     news_items,
@@ -348,6 +514,11 @@ class IBKRScanner:
                 if news_items
                 else None
             )
+        else:
+            # mode == "none" or mode == "llm" without llm_result (defensive).
+            # No catalyst evaluation runs; the hit drops at the
+            # no-catalyst filter downstream.
+            catalyst = None
         reasons: list[str] = []
         if float_shares is None:
             reasons.append("float_unknown")

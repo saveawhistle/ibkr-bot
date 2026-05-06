@@ -1702,3 +1702,70 @@ async def test_bar_staleness_resumes_on_new_bar(monkeypatch: pytest.MonkeyPatch)
     # successful evaluation (from the fresh bars that followed).
     assert len(stale_events) >= 1
     assert strat.calls >= 1, "expected strategy to evaluate at least one fresh bar"
+
+
+# ---------- Phase 12: on_symbol_dropped hook ---------- #
+
+
+@pytest.mark.asyncio
+async def test_apply_watchlist_diff_invokes_on_symbol_dropped_hook() -> None:
+    """Phase 12: dropped symbols flow through ``on_symbol_dropped`` once each.
+
+    The orchestrator wires the LLM catalyst classifier's
+    ``on_watchlist_removal`` here so re-entered tickers re-evaluate
+    fresh next time they appear in a scan.
+    """
+    from bot.orchestrator import _apply_watchlist_diff
+
+    initial = ["A", "B", "C"]
+    new_scan = ["B", "C", "D"]  # A dropped, D added
+    frames = {s: pd.DataFrame({"close": [10.0]}) for s in initial + new_scan}
+    fake = _FakeMarketData(frames)
+    streams = await _seed_streams(fake, initial)
+
+    dropped: list[str] = []
+    added, removed = await _apply_watchlist_diff(
+        [_hit(s) for s in new_scan],
+        streams=streams,
+        market_data=cast("MarketData", fake),
+        position_store=None,
+        max_size=10,
+        on_symbol_dropped=dropped.append,
+    )
+    assert removed == ["A"]
+    assert dropped == ["A"], "the dropped symbol must reach the hook exactly once"
+    assert added == ["D"]
+
+
+@pytest.mark.asyncio
+async def test_apply_watchlist_diff_hook_failure_does_not_break_diff() -> None:
+    """A misbehaving hook must not abort the watchlist diff."""
+    import structlog
+    from structlog.testing import capture_logs
+
+    from bot.orchestrator import _apply_watchlist_diff
+
+    structlog.reset_defaults()
+
+    def _broken_hook(symbol: str) -> None:
+        raise RuntimeError(f"hook bug for {symbol}")
+
+    initial = ["A", "B"]
+    new_scan = ["C"]
+    frames = {s: pd.DataFrame({"close": [10.0]}) for s in initial + new_scan}
+    fake = _FakeMarketData(frames)
+    streams = await _seed_streams(fake, initial)
+
+    with capture_logs() as captured:
+        added, removed = await _apply_watchlist_diff(
+            [_hit(s) for s in new_scan],
+            streams=streams,
+            market_data=cast("MarketData", fake),
+            position_store=None,
+            max_size=10,
+            on_symbol_dropped=_broken_hook,
+        )
+    assert set(removed) == {"A", "B"}
+    assert added == ["C"]
+    events = [e.get("event") for e in captured]
+    assert "orchestrator.on_symbol_dropped_failed" in events
