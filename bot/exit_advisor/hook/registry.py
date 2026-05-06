@@ -116,9 +116,7 @@ def _resolve_hook(settings: Settings | None) -> ExitAdvisorHook | None:
     return _registered_advisor
 
 
-def _run_with_timeout(
-    fn: Callable[..., Any], timeout_seconds: float, *args: Any
-) -> Any:
+def _run_with_timeout(fn: Callable[..., Any], timeout_seconds: float, *args: Any) -> Any:
     """Execute ``fn(*args)`` in the worker pool with a wall-clock timeout.
 
     Raises :class:`concurrent.futures.TimeoutError` if the deadline
@@ -149,9 +147,7 @@ def notify_position_protected(
     cfg = (settings or get_settings()).exit_advisor
     started = time.monotonic()
     try:
-        _run_with_timeout(
-            advisor.on_position_protected, cfg.timeout_seconds, position
-        )
+        _run_with_timeout(advisor.on_position_protected, cfg.timeout_seconds, position)
     except FuturesTimeoutError:
         _log.warning(
             "exit_advisor.position_protected_timeout",
@@ -195,9 +191,7 @@ def notify_position_closed(
     cfg = (settings or get_settings()).exit_advisor
     started = time.monotonic()
     try:
-        _run_with_timeout(
-            advisor.on_position_closed, cfg.timeout_seconds, position, final_pnl
-        )
+        _run_with_timeout(advisor.on_position_closed, cfg.timeout_seconds, position, final_pnl)
     except FuturesTimeoutError:
         _log.warning(
             "exit_advisor.position_closed_timeout",

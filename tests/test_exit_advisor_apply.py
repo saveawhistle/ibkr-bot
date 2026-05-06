@@ -28,9 +28,7 @@ class _FakeTradeManager:
         self.return_value = return_value
         self.calls: list[tuple[Any, float, str]] = []
 
-    async def execute_advisor_exit(
-        self, position: Any, *, exit_price: float, reason: str
-    ) -> bool:
+    async def execute_advisor_exit(self, position: Any, *, exit_price: float, reason: str) -> bool:
         self.calls.append((position, exit_price, reason))
         return self.return_value
 
@@ -64,9 +62,7 @@ async def test_apply_exit_full_routes_to_trade_manager() -> None:
     """``exit_full`` calls execute_advisor_exit with the exit_price + reason."""
     tm = _FakeTradeManager(return_value=True)
     applier = RecommendationApplier(tm)
-    rec = ExitRecommendation(
-        action="exit_full", reason="9ema break", source="advisor_v1"
-    )
+    rec = ExitRecommendation(action="exit_full", reason="9ema break", source="advisor_v1")
     pos = _StubPosition()
     result = await applier.apply(rec, pos, exit_price=2.18)
     assert result is True
@@ -137,8 +133,6 @@ async def test_apply_unknown_action_rejected_loudly() -> None:
         result = await applier.apply(rec, _StubPosition(), exit_price=2.27)
     assert result is False
     rejections = [
-        e
-        for e in captured
-        if e["event"] == "exit_advisor.recommendation_rejected_unknown_action"
+        e for e in captured if e["event"] == "exit_advisor.recommendation_rejected_unknown_action"
     ]
     assert len(rejections) == 1

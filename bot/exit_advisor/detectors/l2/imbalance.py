@@ -29,18 +29,14 @@ class ImbalanceDetector:
         default="balanced", init=False
     )
 
-    def consume(
-        self, event: L2BookUpdate | L2Print, book_state: BookState
-    ) -> list[Event]:
+    def consume(self, event: L2BookUpdate | L2Print, book_state: BookState) -> list[Event]:
         if not isinstance(event, L2BookUpdate):
             return []
         if not book_state.bids or not book_state.asks:
             return []
         bid_total = sum(lv.size for lv in book_state.bids[: self.levels_to_sum])
         ask_total = sum(lv.size for lv in book_state.asks[: self.levels_to_sum])
-        levels_summed = min(
-            self.levels_to_sum, len(book_state.bids), len(book_state.asks)
-        )
+        levels_summed = min(self.levels_to_sum, len(book_state.bids), len(book_state.asks))
         if bid_total <= 0 or ask_total <= 0:
             return []
         favored: Literal["bid", "ask"]

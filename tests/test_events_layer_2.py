@@ -84,8 +84,9 @@ def test_level_touched_re_arms_after_meaningful_retreat() -> None:
         ],
     )
     touched_below = [
-        e for e in events if isinstance(e, LevelTouched)
-        and e.level_name == "hod" and e.direction == "from_below"
+        e
+        for e in events
+        if isinstance(e, LevelTouched) and e.level_name == "hod" and e.direction == "from_below"
     ]
     assert len(touched_below) == 2
 
@@ -93,16 +94,15 @@ def test_level_touched_re_arms_after_meaningful_retreat() -> None:
 def test_prior_day_close_fires_when_data_available() -> None:
     det = PriceLevelsDetector(symbol="X", prior_day_close=10.0)
     events = _run(det, [_bar(0, 9.5, 10.5, 9.5, 10.2)])
-    assert any(
-        isinstance(e, LevelTouched) and e.level_name == "prior_day_close" for e in events
-    )
+    assert any(isinstance(e, LevelTouched) and e.level_name == "prior_day_close" for e in events)
 
 
 def test_prior_day_data_missing_emits_warning_once() -> None:
     det = PriceLevelsDetector(symbol="X")  # no prior-day data
     events = _run(det, [_bar(0, 10.0, 10.1, 9.9, 10.05), _bar(1, 10.05, 10.2, 10.0, 10.1)])
     warnings = [
-        e for e in events
+        e
+        for e in events
         if isinstance(e, LevelDataUnavailable) and e.level_name == "prior_day_high"
     ]
     assert len(warnings) == 1
@@ -127,9 +127,7 @@ def test_gap_fill_only_fires_when_gap_exceeds_threshold() -> None:
         gap_threshold_pct=0.01,
     )
     events_no = _run(det_no_gap, [_bar(0, 10.05, 10.20, 9.95, 10.10)])
-    assert not any(
-        isinstance(e, LevelTouched) and e.level_name == "gap_fill" for e in events_no
-    )
+    assert not any(isinstance(e, LevelTouched) and e.level_name == "gap_fill" for e in events_no)
 
 
 def test_level_reclaimed_requires_prior_break() -> None:
@@ -145,7 +143,9 @@ def test_level_reclaimed_requires_prior_break() -> None:
             _bar(2, 10.3, 10.4, 9.6, 9.8),  # closes below; reclaim from above
         ],
     )
-    reclaims = [e for e in events if isinstance(e, LevelReclaimed) and e.level_name == "prior_day_close"]
+    reclaims = [
+        e for e in events if isinstance(e, LevelReclaimed) and e.level_name == "prior_day_close"
+    ]
     assert len(reclaims) == 2
     assert reclaims[0].direction == "below_to_above"
     assert reclaims[1].direction == "above_to_below"
@@ -159,7 +159,7 @@ def test_vwap_cross_fires_on_side_flip() -> None:
     bars = [
         _bar(0, 10.0, 10.0, 10.0, 10.0, v=100),  # VWAP = 10.0; side = above? equal — skipped
         _bar(1, 10.0, 10.5, 10.0, 10.4, v=100),  # close 10.4 > VWAP — set side above
-        _bar(2, 10.4, 10.4, 9.5, 9.6, v=100),   # close 9.6 < VWAP — flip
+        _bar(2, 10.4, 10.4, 9.5, 9.6, v=100),  # close 9.6 < VWAP — flip
     ]
     events = _run(det, bars)
     crosses = [e for e in events if isinstance(e, MovingAverageCross) and e.ma_name == "vwap"]
@@ -276,8 +276,8 @@ def test_shooting_star_detected() -> None:
 def test_engulfing_requires_prior_bar() -> None:
     det = BarShapeDetector(symbol="X")
     bars = [
-        _bar(0, 10.0, 10.2, 9.9, 9.95),    # red small
-        _bar(1, 9.90, 10.50, 9.85, 10.40), # green large engulfs prior body
+        _bar(0, 10.0, 10.2, 9.9, 9.95),  # red small
+        _bar(1, 9.90, 10.50, 9.85, 10.40),  # green large engulfs prior body
     ]
     events = _run(det, bars)
     shapes = [e for e in events if isinstance(e, BarShapeDetected) and e.shape == "engulfing"]
@@ -317,7 +317,9 @@ def test_wick_event_upper_and_lower_can_both_fire() -> None:
 
 def test_consecutive_bars_fires_at_and_past_threshold() -> None:
     det = BarShapeDetector(symbol="X", consecutive_bars_threshold=3)
-    bars = [_bar(i, 10.0 + i * 0.1, 10.0 + i * 0.1 + 0.1, 9.95, 10.0 + i * 0.1 + 0.05) for i in range(5)]
+    bars = [
+        _bar(i, 10.0 + i * 0.1, 10.0 + i * 0.1 + 0.1, 9.95, 10.0 + i * 0.1 + 0.05) for i in range(5)
+    ]
     events = _run(det, bars)
     consecutive = [e for e in events if isinstance(e, ConsecutiveBars)]
     counts = [e.count for e in consecutive]

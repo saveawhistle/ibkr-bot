@@ -89,9 +89,7 @@ def test_mean_excludes_non_firing_trades() -> None:
 
 def test_delta_vs_actual_and_oracle_computed() -> None:
     outcomes = [
-        _outcome(
-            "t1", "FixedR", {"r": 1.0}, True, 5.0, fired=True, actual_pnl=3.0, oracle_pnl=8.0
-        ),
+        _outcome("t1", "FixedR", {"r": 1.0}, True, 5.0, fired=True, actual_pnl=3.0, oracle_pnl=8.0),
         _outcome(
             "t2", "FixedR", {"r": 1.0}, True, 7.0, fired=True, actual_pnl=2.0, oracle_pnl=10.0
         ),

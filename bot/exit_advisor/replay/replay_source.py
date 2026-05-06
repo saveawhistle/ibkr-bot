@@ -80,9 +80,7 @@ class TradeReplayData:
     from the historical bar cache when populated, else empty.
     Detectors that depend on prior-day data must degrade gracefully."""
 
-    prior_day_cache_state: Literal[
-        "hit", "marked_unavailable", "not_populated"
-    ] = "not_populated"
+    prior_day_cache_state: Literal["hit", "marked_unavailable", "not_populated"] = "not_populated"
     """Three operational states for the prior-day cache (see
     :class:`cache_loader.HistoricalBarCache`). The harness can emit
     different warnings based on which state applied."""
@@ -136,9 +134,7 @@ def _bar_from_event(e: dict[str, Any]) -> Bar:
     )
 
 
-def _load_symbol_bars(
-    path: Path, symbol: str, *, rth_only: bool = True
-) -> list[Bar]:
+def _load_symbol_bars(path: Path, symbol: str, *, rth_only: bool = True) -> list[Bar]:
     """Load every ``market_data.bar_received`` entry for ``symbol`` from
     a session log, filtered to RTH if requested.
 
@@ -224,8 +220,10 @@ def load_trade_replay_data(
         if ts < bracket_ts:
             continue
         ev_name = e.get("event")
-        if ev_name == "position.opened" and entry_event is None and (
-            e.get("parent_order_id") == parent_id or parent_id is None
+        if (
+            ev_name == "position.opened"
+            and entry_event is None
+            and (e.get("parent_order_id") == parent_id or parent_id is None)
         ):
             entry_event = e
         elif ev_name == "position.filled" and fill_event is None:
@@ -397,9 +395,7 @@ def load_prior_n_day_volume_curve(
     """
     from .cache_loader import HistoricalBarCache
 
-    cache = HistoricalBarCache(
-        cache_dir=cache_dir if cache_dir is not None else DEFAULT_CACHE_DIR
-    )
+    cache = HistoricalBarCache(cache_dir=cache_dir if cache_dir is not None else DEFAULT_CACHE_DIR)
     daily_curves: list[dict[int, int]] = []
     cursor = _prior_trading_day(trade_date)
     days_attempted = 0

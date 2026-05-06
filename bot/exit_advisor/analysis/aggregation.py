@@ -107,9 +107,7 @@ def aggregate_results(
         if fired_pnls:
             agg.mean_pnl_when_fired = statistics.fmean(fired_pnls)
             agg.median_pnl_when_fired = statistics.median(fired_pnls)
-            agg.stdev_pnl_when_fired = (
-                statistics.pstdev(fired_pnls) if len(fired_pnls) > 1 else 0.0
-            )
+            agg.stdev_pnl_when_fired = statistics.pstdev(fired_pnls) if len(fired_pnls) > 1 else 0.0
 
         agg.total_pnl = sum(o.final_pnl for o in items)
         agg.total_actual_pnl = sum(o.actual_pnl for o in items)

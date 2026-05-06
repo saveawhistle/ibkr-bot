@@ -199,7 +199,9 @@ async def test_classifies_protected_when_stp_covers_full_position() -> None:
     store.insert_reconciled(_build_position(symbol="ABC", shares=83))
     stp = _FakeTrade(
         symbol="ABC",
-        order=_FakeOrder(order_id=1, action="SELL", order_type="STP", total_quantity=83, aux_price=2.34),
+        order=_FakeOrder(
+            order_id=1, action="SELL", order_type="STP", total_quantity=83, aux_price=2.34
+        ),
     )
     ibkr = _build_ibkr(positions=[("ABC", 83)], open_trades=[stp])
     wd = _watchdog(store=store, ibkr=ibkr)
@@ -242,7 +244,9 @@ async def test_classifies_underprotected_when_only_lmt_above_market() -> None:
     store.insert_reconciled(_build_position(symbol="BIYA", shares=41, avg_price=2.49))
     take_profit = _FakeTrade(
         symbol="BIYA",
-        order=_FakeOrder(order_id=771, action="SELL", order_type="LMT", total_quantity=20, lmt_price=2.77),
+        order=_FakeOrder(
+            order_id=771, action="SELL", order_type="LMT", total_quantity=20, lmt_price=2.77
+        ),
     )
     ibkr = _build_ibkr(positions=[("BIYA", 41)], open_trades=[take_profit])
     wd = _watchdog(store=store, ibkr=ibkr)
@@ -264,7 +268,9 @@ async def test_lmt_above_market_does_not_count_as_protection() -> None:
     store.insert_reconciled(_build_position(symbol="BIYA", shares=41))
     lmt_only = _FakeTrade(
         symbol="BIYA",
-        order=_FakeOrder(order_id=2, action="SELL", order_type="LMT", total_quantity=41, lmt_price=2.77),
+        order=_FakeOrder(
+            order_id=2, action="SELL", order_type="LMT", total_quantity=41, lmt_price=2.77
+        ),
     )
     ibkr = _build_ibkr(positions=[("BIYA", 41)], open_trades=[lmt_only])
     wd = _watchdog(store=store, ibkr=ibkr)
@@ -283,11 +289,15 @@ async def test_multiple_stops_summing_to_cover_classify_protected() -> None:
     store.insert_reconciled(_build_position(symbol="ABC", shares=100))
     stp_a = _FakeTrade(
         symbol="ABC",
-        order=_FakeOrder(order_id=1, action="SELL", order_type="STP", total_quantity=60, aux_price=2.0),
+        order=_FakeOrder(
+            order_id=1, action="SELL", order_type="STP", total_quantity=60, aux_price=2.0
+        ),
     )
     stp_b = _FakeTrade(
         symbol="ABC",
-        order=_FakeOrder(order_id=2, action="SELL", order_type="TRAIL", total_quantity=40, aux_price=2.1),
+        order=_FakeOrder(
+            order_id=2, action="SELL", order_type="TRAIL", total_quantity=40, aux_price=2.1
+        ),
     )
     ibkr = _build_ibkr(positions=[("ABC", 100)], open_trades=[stp_a, stp_b])
     wd = _watchdog(store=store, ibkr=ibkr)
@@ -304,7 +314,9 @@ async def test_trail_order_counts_as_protection() -> None:
     store.insert_reconciled(_build_position(symbol="ABC", shares=50))
     trail = _FakeTrade(
         symbol="ABC",
-        order=_FakeOrder(order_id=1, action="SELL", order_type="TRAIL", total_quantity=50, aux_price=10.0),
+        order=_FakeOrder(
+            order_id=1, action="SELL", order_type="TRAIL", total_quantity=50, aux_price=10.0
+        ),
     )
     ibkr = _build_ibkr(positions=[("ABC", 50)], open_trades=[trail])
     wd = _watchdog(store=store, ibkr=ibkr)
@@ -381,7 +393,9 @@ async def test_mismatch_between_bot_and_ibkr_emits_separate_event() -> None:
     store.insert_reconciled(_build_position(symbol="ABC", shares=100))
     stp = _FakeTrade(
         symbol="ABC",
-        order=_FakeOrder(order_id=1, action="SELL", order_type="STP", total_quantity=100, aux_price=2.0),
+        order=_FakeOrder(
+            order_id=1, action="SELL", order_type="STP", total_quantity=100, aux_price=2.0
+        ),
     )
     ibkr = _build_ibkr(positions=[("ABC", 50)], open_trades=[stp])
     wd = _watchdog(store=store, ibkr=ibkr)
@@ -402,7 +416,9 @@ async def test_mismatch_position_missing_from_ibkr() -> None:
     store.insert_reconciled(_build_position(symbol="ABC", shares=100))
     stp = _FakeTrade(
         symbol="ABC",
-        order=_FakeOrder(order_id=1, action="SELL", order_type="STP", total_quantity=100, aux_price=2.0),
+        order=_FakeOrder(
+            order_id=1, action="SELL", order_type="STP", total_quantity=100, aux_price=2.0
+        ),
     )
     ibkr = _build_ibkr(positions=[], open_trades=[stp])
     wd = _watchdog(store=store, ibkr=ibkr)
@@ -515,7 +531,9 @@ async def test_protected_transition_clears_prior_suppressions() -> None:
     # Operator manually places a stop in TWS — IBKR view now has it.
     stp = _FakeTrade(
         symbol="ABC",
-        order=_FakeOrder(order_id=99, action="SELL", order_type="STP", total_quantity=100, aux_price=2.0),
+        order=_FakeOrder(
+            order_id=99, action="SELL", order_type="STP", total_quantity=100, aux_price=2.0
+        ),
     )
     wd._ibkr.ib._open_trades = [stp]  # type: ignore[attr-defined]
     wd._last_ran_at = None
@@ -584,7 +602,9 @@ async def test_shadow_alert_skipped_carries_ack_id_for_review() -> None:
     store.insert_reconciled(_build_position(symbol="BIYA", shares=41))
     take_profit = _FakeTrade(
         symbol="BIYA",
-        order=_FakeOrder(order_id=771, action="SELL", order_type="LMT", total_quantity=20, lmt_price=2.77),
+        order=_FakeOrder(
+            order_id=771, action="SELL", order_type="LMT", total_quantity=20, lmt_price=2.77
+        ),
     )
     ibkr = _build_ibkr(positions=[("BIYA", 41)], open_trades=[take_profit])
     wd = _watchdog(store=store, ibkr=ibkr, settings=settings)
@@ -660,7 +680,9 @@ async def test_partially_filled_remaining_quantity_used_for_protection_count() -
     store.insert_reconciled(_build_position(symbol="BIYA", shares=41))
     stp_partial = _FakeTrade(
         symbol="BIYA",
-        order=_FakeOrder(order_id=770, action="SELL", order_type="STP", total_quantity=83, aux_price=2.34),
+        order=_FakeOrder(
+            order_id=770, action="SELL", order_type="STP", total_quantity=83, aux_price=2.34
+        ),
         status="PreSubmitted",
         remaining=41,
     )
@@ -679,7 +701,9 @@ async def test_inactive_orders_are_filtered_out() -> None:
     store.insert_reconciled(_build_position(symbol="ABC", shares=100))
     cancelled = _FakeTrade(
         symbol="ABC",
-        order=_FakeOrder(order_id=1, action="SELL", order_type="STP", total_quantity=100, aux_price=2.0),
+        order=_FakeOrder(
+            order_id=1, action="SELL", order_type="STP", total_quantity=100, aux_price=2.0
+        ),
         status="Cancelled",
     )
     ibkr = _build_ibkr(positions=[("ABC", 100)], open_trades=[cancelled])

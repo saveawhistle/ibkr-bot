@@ -16,7 +16,5 @@ from bot.exit_advisor.replay.replay_source import Bar
 
 
 class Detector(Protocol):
-    def on_bar(
-        self, bar: Bar, history: BarHistory
-    ) -> list[Event]:  # pragma: no cover - protocol
+    def on_bar(self, bar: Bar, history: BarHistory) -> list[Event]:  # pragma: no cover - protocol
         ...

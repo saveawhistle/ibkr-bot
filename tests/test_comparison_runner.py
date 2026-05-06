@@ -111,11 +111,7 @@ def test_runner_runs_each_policy_twice(tmp_path: Path) -> None:
         output_dir=tmp_path / "reports",
         cache_dir=FIXTURES,
     )
-    rows = [
-        json.loads(ln)
-        for ln in jsonl_path.read_text(encoding="utf-8").splitlines()
-        if ln
-    ]
+    rows = [json.loads(ln) for ln in jsonl_path.read_text(encoding="utf-8").splitlines() if ln]
     by_pair: dict[tuple[str, str], list[dict[str, object]]] = {}
     for r in rows:
         key = (r["policy_name"], json.dumps(r["policy_params"], sort_keys=True))
@@ -135,11 +131,7 @@ def test_runner_actual_policy_pnl_matches_recorded(tmp_path: Path) -> None:
         output_dir=tmp_path / "reports",
         cache_dir=FIXTURES,
     )
-    rows = [
-        json.loads(ln)
-        for ln in jsonl_path.read_text(encoding="utf-8").splitlines()
-        if ln
-    ]
+    rows = [json.loads(ln) for ln in jsonl_path.read_text(encoding="utf-8").splitlines() if ln]
     actual_rows = [r for r in rows if r["policy_name"] == "ActualPolicy"]
     assert len(actual_rows) == 2  # gates on + off
     for r in actual_rows:

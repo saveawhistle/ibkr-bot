@@ -330,9 +330,7 @@ def test_on_position_protected_timeout_logs_and_returns() -> None:
     settings = _make_settings(enabled=True, timeout_seconds=0.1)
     with capture_logs() as captured:
         notify_position_protected(_StubPosition(), settings=settings)
-    timeouts = [
-        e for e in captured if e["event"] == "exit_advisor.position_protected_timeout"
-    ]
+    timeouts = [e for e in captured if e["event"] == "exit_advisor.position_protected_timeout"]
     assert len(timeouts) == 1
 
 

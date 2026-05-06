@@ -114,7 +114,9 @@ class BookStateTracker:
             else:
                 log.warning(
                     "delete for non-existent %s level at %.4f (%s); ignoring",
-                    evt.side, evt.price, evt.symbol,
+                    evt.side,
+                    evt.price,
+                    evt.symbol,
                 )
             return
 

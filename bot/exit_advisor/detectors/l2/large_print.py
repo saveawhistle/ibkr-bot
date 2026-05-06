@@ -29,9 +29,7 @@ class LargePrintDetector:
 
     _history: deque[int] = field(default_factory=deque, init=False)
 
-    def consume(
-        self, event: L2BookUpdate | L2Print, book_state: BookState
-    ) -> list[Event]:
+    def consume(self, event: L2BookUpdate | L2Print, book_state: BookState) -> list[Event]:
         if not isinstance(event, L2Print):
             return []
         events: list[Event] = []

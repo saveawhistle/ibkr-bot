@@ -184,9 +184,7 @@ class TestAccountSummaryCache:
     async def test_first_call_round_trips(self) -> None:
         """First call hits ``accountSummaryAsync`` and populates the cache."""
         ib = _mock_ib()
-        ib.accountSummaryAsync = AsyncMock(
-            return_value=[_account_row("AvailableFunds", "10000")]
-        )
+        ib.accountSummaryAsync = AsyncMock(return_value=[_account_row("AvailableFunds", "10000")])
         client = IBKRClient(settings=_settings(), ib=ib)
         await client.connect()
         out = await client.account_summary()
@@ -197,9 +195,7 @@ class TestAccountSummaryCache:
     async def test_within_ttl_serves_cached(self) -> None:
         """Second call within TTL window returns the cached snapshot, no round-trip."""
         ib = _mock_ib()
-        ib.accountSummaryAsync = AsyncMock(
-            return_value=[_account_row("AvailableFunds", "10000")]
-        )
+        ib.accountSummaryAsync = AsyncMock(return_value=[_account_row("AvailableFunds", "10000")])
         client = IBKRClient(settings=_settings(), ib=ib)
         await client.connect()
         await client.account_summary()
@@ -215,9 +211,7 @@ class TestAccountSummaryCache:
         values, not a possibly-cached snapshot.
         """
         ib = _mock_ib()
-        ib.accountSummaryAsync = AsyncMock(
-            return_value=[_account_row("AvailableFunds", "10000")]
-        )
+        ib.accountSummaryAsync = AsyncMock(return_value=[_account_row("AvailableFunds", "10000")])
         client = IBKRClient(settings=_settings(), ib=ib)
         await client.connect()
         await client.account_summary()
@@ -228,9 +222,7 @@ class TestAccountSummaryCache:
     async def test_invalidate_forces_next_call_to_round_trip(self) -> None:
         """``invalidate_account_summary_cache`` drops the cache; next call re-fetches."""
         ib = _mock_ib()
-        ib.accountSummaryAsync = AsyncMock(
-            return_value=[_account_row("AvailableFunds", "10000")]
-        )
+        ib.accountSummaryAsync = AsyncMock(return_value=[_account_row("AvailableFunds", "10000")])
         client = IBKRClient(settings=_settings(), ib=ib)
         await client.connect()
         await client.account_summary()
@@ -254,9 +246,7 @@ class TestAccountSummaryCache:
         would see the mutation.
         """
         ib = _mock_ib()
-        ib.accountSummaryAsync = AsyncMock(
-            return_value=[_account_row("AvailableFunds", "10000")]
-        )
+        ib.accountSummaryAsync = AsyncMock(return_value=[_account_row("AvailableFunds", "10000")])
         client = IBKRClient(settings=_settings(), ib=ib)
         await client.connect()
         first = await client.account_summary()
@@ -270,9 +260,7 @@ class TestAccountSummaryCache:
     async def test_disconnect_clears_cache(self) -> None:
         """Disconnecting drops the cache so a reconnected session re-fetches."""
         ib = _mock_ib()
-        ib.accountSummaryAsync = AsyncMock(
-            return_value=[_account_row("AvailableFunds", "10000")]
-        )
+        ib.accountSummaryAsync = AsyncMock(return_value=[_account_row("AvailableFunds", "10000")])
         client = IBKRClient(settings=_settings(), ib=ib)
         await client.connect()
         await client.account_summary()
@@ -387,9 +375,7 @@ class TestLongnameCache:
     async def test_disconnect_clears_cache(self) -> None:
         """Reconnect path must not serve stale longName from prior socket."""
         ib = _mock_ib()
-        ib.reqContractDetailsAsync = AsyncMock(
-            return_value=[_contract_details("FIRST NAME")]
-        )
+        ib.reqContractDetailsAsync = AsyncMock(return_value=[_contract_details("FIRST NAME")])
         client = IBKRClient(settings=_settings(), ib=ib)
         await client.connect()
         await client.get_longname("X")

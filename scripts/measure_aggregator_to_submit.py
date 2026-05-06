@@ -327,8 +327,7 @@ def _report(registry: Registry) -> None:
     print()
     print("=" * 92)
     print(
-        f"PER-MINUTE COMPARISON — {SYMBOL} — {len(paired)} minutes paired "
-        f"(A and B both observed)"
+        f"PER-MINUTE COMPARISON — {SYMBOL} — {len(paired)} minutes paired (A and B both observed)"
     )
     print("=" * 92)
     print(
@@ -438,7 +437,9 @@ async def main() -> None:
     contract = qualified[0]
 
     # Path A
-    def _path_a_final(minute: datetime, candle: _Candle, finalized_at: datetime, trigger: str) -> None:
+    def _path_a_final(
+        minute: datetime, candle: _Candle, finalized_at: datetime, trigger: str
+    ) -> None:
         registry.record("A", minute, candle, finalized_at, trigger, contract)
 
     path_a = PathAAggregator(on_minute_final=_path_a_final)
@@ -452,7 +453,9 @@ async def main() -> None:
     rt_bars.updateEvent += _on_5sec_update
 
     # Path B
-    def _path_b_final(minute: datetime, candle: _Candle, finalized_at: datetime, trigger: str) -> None:
+    def _path_b_final(
+        minute: datetime, candle: _Candle, finalized_at: datetime, trigger: str
+    ) -> None:
         registry.record("B", minute, candle, finalized_at, trigger, contract)
 
     path_b = PathBAggregator(on_minute_final=_path_b_final)

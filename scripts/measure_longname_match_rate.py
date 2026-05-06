@@ -111,7 +111,6 @@ _NAME_STOPWORDS: Final[frozenset[str]] = frozenset(
         "uk",
         "ca",
         "cn",
-        "ltd",
         # Class / share-type indicators
         "a",
         "b",
@@ -259,9 +258,7 @@ async def _fetch_longname(ib: IB, symbol: str) -> str:
     """
     contract = Stock(symbol, "SMART", "USD")
     try:
-        details_list = await asyncio.wait_for(
-            ib.reqContractDetailsAsync(contract), timeout=10.0
-        )
+        details_list = await asyncio.wait_for(ib.reqContractDetailsAsync(contract), timeout=10.0)
     except (TimeoutError, Exception) as exc:  # noqa: BLE001 - probe; show everything
         print(f"  [warn] {symbol}: contract details lookup failed — {exc!r}")
         return ""
@@ -296,9 +293,7 @@ def _evaluate(event: CatalystEvent, longname: str) -> GateOutcome:
     # --- Current gate (Phase 9.7) ---
     current_g1 = _ticker_in_headline(headline_lc, ticker_lc)
     current_g2 = (
-        _phrase_near_ticker(text_lc, event.matched_phrase, ticker_lc)
-        if current_g1
-        else False
+        _phrase_near_ticker(text_lc, event.matched_phrase, ticker_lc) if current_g1 else False
     )
     current_accepts = current_g1 and current_g2
 
@@ -349,14 +344,15 @@ def _report(outcomes: list[GateOutcome], longnames: dict[str, str]) -> None:
 
     _delim("HEADLINE COUNT BY GATE OUTCOME")
     print(f"  total catalyst.item_matched events: {total}")
-    print(f"  both gates accept              : {both_accept:5d}  ({both_accept / total * 100:5.1f}%)")
+    print(
+        f"  both gates accept              : {both_accept:5d}  ({both_accept / total * 100:5.1f}%)"
+    )
     print(
         f"  RESCUE (current rej, ext acc)  : {len(rescues):5d}  "
         f"({len(rescues) / total * 100:5.1f}%)"
     )
     print(
-        f"  both gates reject              : {both_reject:5d}  "
-        f"({both_reject / total * 100:5.1f}%)"
+        f"  both gates reject              : {both_reject:5d}  ({both_reject / total * 100:5.1f}%)"
     )
 
     _delim("LONGNAME COVERAGE")
@@ -367,7 +363,9 @@ def _report(outcomes: list[GateOutcome], longnames: dict[str, str]) -> None:
     print(f"  with empty longName         : {no_name}")
     if no_name:
         empties = sorted(s for s, n in longnames.items() if not n)
-        print(f"  empty-name symbols          : {', '.join(empties[:30])}{'...' if len(empties) > 30 else ''}")
+        print(
+            f"  empty-name symbols          : {', '.join(empties[:30])}{'...' if len(empties) > 30 else ''}"
+        )
 
     _delim("LONGNAME SAMPLE — first 25 symbols (raw IBKR data)")
     for symbol in sorted(longnames)[:25]:
@@ -387,7 +385,9 @@ def _report(outcomes: list[GateOutcome], longnames: dict[str, str]) -> None:
             print(f"  session     = {o.event.session_date}")
             print(f"  category    = {o.event.category}")
             print(f"  matched     = {o.event.matched_phrase!r}")
-            print(f"  rescued by  = {o.extension_matched_token!r}  (longName tokens: {o.name_tokens})")
+            print(
+                f"  rescued by  = {o.extension_matched_token!r}  (longName tokens: {o.name_tokens})"
+            )
             print(f"  longName    = {o.longname!r}")
             print(f"  headline    = {o.event.headline!r}")
 
@@ -401,9 +401,7 @@ def _report(outcomes: list[GateOutcome], longnames: dict[str, str]) -> None:
 
     _delim("DECISION HEURISTIC")
     rescue_pct = len(rescues) / total * 100
-    print(
-        f"  Rescue rate: {rescue_pct:.1f}% of historical catalyst.item_matched events would"
-    )
+    print(f"  Rescue rate: {rescue_pct:.1f}% of historical catalyst.item_matched events would")
     print("  flip from rejected (current Phase 9.7 gate) to accepted (name-extended gate).")
     print()
     if rescue_pct < 1.0:

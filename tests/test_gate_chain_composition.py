@@ -53,7 +53,13 @@ def test_default_chain_hard_guardrails_first() -> None:
     and fail fast on safety violations before tunable thresholds run."""
     chain = build_default_gate_chain(ExitGatesConfig())
     names = [g.name for g in chain]
-    hard = ("protected_position", "no_reentry", "stop_protection", "naked_position", "max_hold_time")
+    hard = (
+        "protected_position",
+        "no_reentry",
+        "stop_protection",
+        "naked_position",
+        "max_hold_time",
+    )
     soft = ("drawdown_acceleration", "confidence_threshold", "recency_throttle")
     last_hard = max(names.index(h) for h in hard)
     first_soft = min(names.index(s) for s in soft)
@@ -105,9 +111,7 @@ def test_apply_chain_drawdown_relaxes_confidence() -> None:
     """End-to-end: a deteriorating-position decision below the normal
     confidence threshold but above the drawdown-reduced threshold
     should pass when drawdown acceleration is detected."""
-    cfg = ExitGatesConfig(
-        confidence_threshold=0.7, drawdown_reduced_confidence_threshold=0.4
-    )
+    cfg = ExitGatesConfig(confidence_threshold=0.7, drawdown_reduced_confidence_threshold=0.4)
     chain = build_default_gate_chain(cfg)
     # Peak at +2R (2.20), current at +1R (2.10) → 50% drawdown.
     state = _state()

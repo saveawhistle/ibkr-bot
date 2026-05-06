@@ -239,7 +239,9 @@ def _build_report(
         out.append(f"- Symbols: {', '.join(symbols)}\n")
         out.append(f"- Total ActualPolicy P&L: {_format_pnl(actual_total)}\n")
         out.append(f"- Total OracleExitPolicy P&L (theoretical max): {_format_pnl(oracle_total)}\n")
-        out.append(f"- Theoretical room for improvement: {_format_pnl(oracle_total - actual_total)}\n\n")
+        out.append(
+            f"- Theoretical room for improvement: {_format_pnl(oracle_total - actual_total)}\n\n"
+        )
 
     # Failure mode distribution.
     out.append("## Failure mode distribution\n\n")
@@ -278,9 +280,9 @@ def _build_report(
         trade_ids = {e["trade_id"] for e in entries}
         sub_aggs = aggregate_subset_by_trades(outcomes, trade_ids)
         rankable = [
-            a for a in sub_aggs.values()
-            if a.gates_enabled
-            and a.policy_name not in ("ActualPolicy", "OracleExitPolicy")
+            a
+            for a in sub_aggs.values()
+            if a.gates_enabled and a.policy_name not in ("ActualPolicy", "OracleExitPolicy")
         ]
         if not rankable:
             out.append("No rankable mechanical policies fired on this subset.\n\n")
@@ -368,7 +370,8 @@ def _build_aggregate_table(
     aggregates: dict[str, PolicyAggregateMetrics], gates_enabled: bool
 ) -> str:
     rows = [
-        a for a in aggregates.values()
+        a
+        for a in aggregates.values()
         if a.gates_enabled is gates_enabled
         and a.policy_name not in ("ActualPolicy", "OracleExitPolicy")
     ]
@@ -437,9 +440,9 @@ def _notable_findings(
 
     # Best mechanical with gates on.
     rankable = [
-        a for a in aggregates.values()
-        if a.gates_enabled
-        and a.policy_name not in ("ActualPolicy", "OracleExitPolicy")
+        a
+        for a in aggregates.values()
+        if a.gates_enabled and a.policy_name not in ("ActualPolicy", "OracleExitPolicy")
     ]
     if rankable:
         best = max(rankable, key=lambda a: a.delta_vs_actual)
@@ -511,9 +514,7 @@ def _layer_5_recommendations(
             "value on runner management is likely the highest-leverage application.\n"
         )
     elif mode2_n > 0:
-        out.append(
-            f"- MODE_2 ({mode2_n} trades): too few for statistical ranking.\n"
-        )
+        out.append(f"- MODE_2 ({mode2_n} trades): too few for statistical ranking.\n")
     else:
         out.append(
             "- MODE_2: zero trades in this dataset. Either the bot rarely reaches "
@@ -532,9 +533,7 @@ def _layer_5_recommendations(
     return out
 
 
-def write_classification_jsonl(
-    classifications: list[TradeClassification], out_path: Path
-) -> None:
+def write_classification_jsonl(classifications: list[TradeClassification], out_path: Path) -> None:
     """One JSON object per classification, with the trade ref + bucket + reasoning."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as fh:
@@ -557,8 +556,7 @@ def run_aggregate_report(
 ) -> tuple[Path, Path]:
     if not manifest_path.exists():
         raise RuntimeError(
-            f"Manifest not found: {manifest_path}. "
-            "Run: python scripts/discover_closed_trades.py"
+            f"Manifest not found: {manifest_path}. Run: python scripts/discover_closed_trades.py"
         )
     refs = read_manifest(manifest_path)
     if not refs:

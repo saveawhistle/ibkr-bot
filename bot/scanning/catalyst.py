@@ -363,8 +363,7 @@ def _phrase_near_ticker(
         return False
     phrase_tok = _token_index_at(text_lc, phrase_pos)
     return any(
-        abs(_token_index_at(text_lc, tp) - phrase_tok) <= max_tokens
-        for tp in ticker_positions
+        abs(_token_index_at(text_lc, tp) - phrase_tok) <= max_tokens for tp in ticker_positions
     )
 
 
@@ -655,9 +654,7 @@ def classify(
         # bucket, since that bucket is sector-wide by design — we'll let the
         # green-list loop run normally and apply the per-category attribution
         # check inside it.
-        ticker_in_head = (
-            ticker_lc is not None and _ticker_in_headline(headline_lc, ticker_lc)
-        )
+        ticker_in_head = ticker_lc is not None and _ticker_in_headline(headline_lc, ticker_lc)
 
         for idx, (category, matcher, requires_attribution) in enumerate(_GREEN_LIST):
             hit = matcher(text)

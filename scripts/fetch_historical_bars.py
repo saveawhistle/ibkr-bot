@@ -58,16 +58,16 @@ SESSION_LOGS_DIR = Path("logs")
 US_MARKET_HOLIDAYS: frozenset[date] = frozenset(
     [
         # 2025
-        date(2025, 1, 1),   # New Year's
+        date(2025, 1, 1),  # New Year's
         date(2025, 1, 20),  # MLK Day
         date(2025, 2, 17),  # Presidents
         date(2025, 4, 18),  # Good Friday
         date(2025, 5, 26),  # Memorial Day
         date(2025, 6, 19),  # Juneteenth
-        date(2025, 7, 4),   # Independence Day
-        date(2025, 9, 1),   # Labor Day
-        date(2025, 11, 27), # Thanksgiving
-        date(2025, 12, 25), # Christmas
+        date(2025, 7, 4),  # Independence Day
+        date(2025, 9, 1),  # Labor Day
+        date(2025, 11, 27),  # Thanksgiving
+        date(2025, 12, 25),  # Christmas
         # 2026
         date(2026, 1, 1),
         date(2026, 1, 19),
@@ -304,9 +304,7 @@ def trading_dates_to_fetch(trade_date: date, prior_days: int) -> list[date]:
     return out
 
 
-async def _run(
-    targets: list[FetchTarget], pacing_seconds: float, prior_days: int
-) -> FetchSummary:
+async def _run(targets: list[FetchTarget], pacing_seconds: float, prior_days: int) -> FetchSummary:
     from bot.brokerage.ibkr_client import IBKRClient
 
     log = logging.getLogger("fetch_historical_bars")
@@ -342,7 +340,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--symbol", help="Single-symbol mode")
     parser.add_argument("--date", help="Trading date (YYYY-MM-DD) for --symbol mode")
-    parser.add_argument("--all-trades", action="store_true", help="Batch mode: every closed trade in logs/")
+    parser.add_argument(
+        "--all-trades", action="store_true", help="Batch mode: every closed trade in logs/"
+    )
     parser.add_argument("--pacing-seconds", type=float, default=10.0)
     parser.add_argument(
         "--prior-days",

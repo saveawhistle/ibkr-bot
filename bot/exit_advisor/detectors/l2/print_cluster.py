@@ -32,9 +32,7 @@ class PrintClusterDetector:
     _buy_cluster_active: bool = field(default=False, init=False)
     _sell_cluster_active: bool = field(default=False, init=False)
 
-    def consume(
-        self, event: L2BookUpdate | L2Print, book_state: BookState
-    ) -> list[Event]:
+    def consume(self, event: L2BookUpdate | L2Print, book_state: BookState) -> list[Event]:
         if not isinstance(event, L2Print):
             return []
         cutoff = event.timestamp - timedelta(seconds=self.window_seconds)
@@ -62,9 +60,7 @@ class PrintClusterDetector:
         prints: deque[L2Print],
         now: datetime,
     ) -> list[Event]:
-        active_attr = (
-            "_buy_cluster_active" if side == "buy" else "_sell_cluster_active"
-        )
+        active_attr = "_buy_cluster_active" if side == "buy" else "_sell_cluster_active"
         active = getattr(self, active_attr)
         if len(prints) >= self.min_prints:
             if active:

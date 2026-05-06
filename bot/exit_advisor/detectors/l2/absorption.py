@@ -38,13 +38,9 @@ class AbsorptionDetector:
     _refresh_counts: dict[tuple[Literal["bid", "ask"], float], int] = field(
         default_factory=dict, init=False
     )
-    _fired: set[tuple[Literal["bid", "ask"], float]] = field(
-        default_factory=set, init=False
-    )
+    _fired: set[tuple[Literal["bid", "ask"], float]] = field(default_factory=set, init=False)
 
-    def consume(
-        self, event: L2BookUpdate | L2Print, book_state: BookState
-    ) -> list[Event]:
+    def consume(self, event: L2BookUpdate | L2Print, book_state: BookState) -> list[Event]:
         if isinstance(event, L2BookUpdate):
             self._track_refresh(event)
             return self._maybe_emit(event, book_state)
@@ -65,9 +61,7 @@ class AbsorptionDetector:
         # placed or replenished.
         self._refresh_counts[key] = self._refresh_counts.get(key, 0) + 1
 
-    def _maybe_emit(
-        self, evt: L2BookUpdate, book_state: BookState
-    ) -> list[Event]:
+    def _maybe_emit(self, evt: L2BookUpdate, book_state: BookState) -> list[Event]:
         if evt.operation == "delete":
             return []
         key = (evt.side, evt.price)

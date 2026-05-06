@@ -40,24 +40,28 @@ def fake_client() -> AsyncMock:
     """A mock IBKRClient with the methods _fetch_one calls."""
     client = AsyncMock()
     client.qualify_stock = AsyncMock(return_value=SimpleNamespace(symbol="ZENA"))
-    client._ib = SimpleNamespace(reqHistoricalDataAsync=AsyncMock(return_value=[_fake_bar(i) for i in range(390)]))
+    client._ib = SimpleNamespace(
+        reqHistoricalDataAsync=AsyncMock(return_value=[_fake_bar(i) for i in range(390)])
+    )
     client.connect = AsyncMock()
     client.disconnect = AsyncMock()
     return client
 
 
-def test_fetch_writes_cache_file(tmp_path: Path, fake_client: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_writes_cache_file(
+    tmp_path: Path, fake_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(fhb, "CACHE_DIR", tmp_path)
-    asyncio.run(
-        fhb._fetch_one(fake_client, "ZENA", date(2026, 4, 30), logging.getLogger("t"))
-    )
+    asyncio.run(fhb._fetch_one(fake_client, "ZENA", date(2026, 4, 30), logging.getLogger("t")))
     cache_file = tmp_path / "ZENA_2026-04-30.jsonl"
     assert cache_file.exists()
     lines = [ln for ln in cache_file.read_text().splitlines() if ln]
     assert len(lines) == 390
 
 
-def test_skip_when_cache_exists(tmp_path: Path, fake_client: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_skip_when_cache_exists(
+    tmp_path: Path, fake_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(fhb, "CACHE_DIR", tmp_path)
     (tmp_path / "ZENA_2026-04-30.jsonl").write_text("{}\n")  # pre-existing cache
 
@@ -81,7 +85,9 @@ def test_skip_when_unavailable_marker_exists(
     fake_client.qualify_stock.assert_not_called()
 
 
-def test_empty_response_writes_unavailable_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_empty_response_writes_unavailable_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(fhb, "CACHE_DIR", tmp_path)
     client = AsyncMock()
     client.qualify_stock = AsyncMock(return_value=SimpleNamespace(symbol="DEAD"))
@@ -122,7 +128,9 @@ def test_qualify_failure_writes_unavailable_marker(
     assert not (tmp_path / "SBLX_2026-04-28.jsonl").exists()
 
 
-def test_fetch_failure_leaves_cache_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fetch_failure_leaves_cache_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(fhb, "CACHE_DIR", tmp_path)
     client = AsyncMock()
     client.qualify_stock = AsyncMock(return_value=SimpleNamespace(symbol="ZENA"))
@@ -144,15 +152,11 @@ def test_running_twice_produces_identical_state(
     """Idempotency: a second run must NOT re-fetch (cache file exists),
     and the cache file's contents must be byte-identical to the first run."""
     monkeypatch.setattr(fhb, "CACHE_DIR", tmp_path)
-    asyncio.run(
-        fhb._fetch_one(fake_client, "ZENA", date(2026, 4, 30), logging.getLogger("t"))
-    )
+    asyncio.run(fhb._fetch_one(fake_client, "ZENA", date(2026, 4, 30), logging.getLogger("t")))
     contents_after_first = (tmp_path / "ZENA_2026-04-30.jsonl").read_bytes()
     fake_client.qualify_stock.reset_mock()
 
-    asyncio.run(
-        fhb._fetch_one(fake_client, "ZENA", date(2026, 4, 30), logging.getLogger("t"))
-    )
+    asyncio.run(fhb._fetch_one(fake_client, "ZENA", date(2026, 4, 30), logging.getLogger("t")))
     contents_after_second = (tmp_path / "ZENA_2026-04-30.jsonl").read_bytes()
 
     assert contents_after_first == contents_after_second
@@ -163,9 +167,7 @@ def test_atomic_write_no_tmp_left_behind(
     tmp_path: Path, fake_client: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(fhb, "CACHE_DIR", tmp_path)
-    asyncio.run(
-        fhb._fetch_one(fake_client, "ZENA", date(2026, 4, 30), logging.getLogger("t"))
-    )
+    asyncio.run(fhb._fetch_one(fake_client, "ZENA", date(2026, 4, 30), logging.getLogger("t")))
     tmp_files = list(tmp_path.glob("*.tmp"))
     assert tmp_files == []
 

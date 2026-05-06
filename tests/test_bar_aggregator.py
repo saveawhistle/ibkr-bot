@@ -143,9 +143,7 @@ def test_partial_minute_finalizes_when_twelfth_bar_arrives() -> None:
     agg, received = _make_aggregator()
 
     for sec in (35, 40, 45, 50, 55):
-        agg.on_5sec_bar(
-            _bar(minute=31, second=sec, close=100.0 + sec / 5.0, volume=100.0)
-        )
+        agg.on_5sec_bar(_bar(minute=31, second=sec, close=100.0 + sec / 5.0, volume=100.0))
 
     assert len(received) == 1
     candle, trigger = received[0]
@@ -273,9 +271,15 @@ def test_in_progress_candle_reflects_partial_minute() -> None:
     """
     agg, _ = _make_aggregator()
 
-    agg.on_5sec_bar(_bar(minute=31, second=0, open_=10.0, high=10.5, low=9.5, close=10.0, volume=100.0))
-    agg.on_5sec_bar(_bar(minute=31, second=5, open_=10.0, high=11.0, low=10.0, close=10.8, volume=200.0))
-    agg.on_5sec_bar(_bar(minute=31, second=10, open_=10.8, high=10.9, low=10.5, close=10.7, volume=150.0))
+    agg.on_5sec_bar(
+        _bar(minute=31, second=0, open_=10.0, high=10.5, low=9.5, close=10.0, volume=100.0)
+    )
+    agg.on_5sec_bar(
+        _bar(minute=31, second=5, open_=10.0, high=11.0, low=10.0, close=10.8, volume=200.0)
+    )
+    agg.on_5sec_bar(
+        _bar(minute=31, second=10, open_=10.8, high=10.9, low=10.5, close=10.7, volume=150.0)
+    )
 
     snap = agg.in_progress_candle
     assert snap is not None

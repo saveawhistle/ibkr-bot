@@ -64,9 +64,7 @@ def test_zena_actual_policy_pnl_unchanged(
     assert abs(result.final_pnl - zena_replay.recorded_pnl) < 0.01
 
 
-def test_zena_vwap_warm_at_entry(
-    zena_replay: TradeReplayData, cfg: ExitEventsConfig
-) -> None:
+def test_zena_vwap_warm_at_entry(zena_replay: TradeReplayData, cfg: ExitEventsConfig) -> None:
     """After the pre-trade backfill, VWAP must be non-None and within
     the bar range we saw in pre-trade data (rough sanity check)."""
     harness = TradeReplayHarness(zena_replay, ActualPolicy(zena_replay), cfg)
@@ -78,9 +76,7 @@ def test_zena_vwap_warm_at_entry(
     assert 2.10 <= vwap <= 2.25
 
 
-def test_zena_ema_9_warm_at_entry(
-    zena_replay: TradeReplayData, cfg: ExitEventsConfig
-) -> None:
+def test_zena_ema_9_warm_at_entry(zena_replay: TradeReplayData, cfg: ExitEventsConfig) -> None:
     """ZENA's pre-trade backfill is ~10 bars, just enough to seed the
     9-bar EMA. After replay the EMA value must be set."""
     harness = TradeReplayHarness(zena_replay, ActualPolicy(zena_replay), cfg)
@@ -91,9 +87,7 @@ def test_zena_ema_9_warm_at_entry(
     assert 2.10 <= ema <= 2.25
 
 
-def test_zena_layer_2_events_emitted(
-    zena_replay: TradeReplayData, cfg: ExitEventsConfig
-) -> None:
+def test_zena_layer_2_events_emitted(zena_replay: TradeReplayData, cfg: ExitEventsConfig) -> None:
     """Layer 2 event types must appear in the emitted stream when the
     detectors are wired in. Specific counts depend on the bar sequence
     and aren't pre-specified — this test only asserts the right
