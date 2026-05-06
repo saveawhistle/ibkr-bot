@@ -283,3 +283,50 @@ def test_compute_cost_handles_missing_usage() -> None:
 def test_build_classification_rejects_non_dict() -> None:
     with pytest.raises(ValueError, match="object"):
         _build_classification("not a dict")
+
+
+def _valid_args(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "qualifies": False,
+        "category": "non_qualifying_other",
+        "confidence": 0.5,
+        "reasoning": "test",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_build_classification_coerces_concerns_string_to_single_item() -> None:
+    result = _build_classification(_valid_args(concerns="dilutive_financing"))
+    assert result.concerns == ("dilutive_financing",)
+
+
+def test_build_classification_coerces_concerns_comma_separated_string() -> None:
+    result = _build_classification(
+        _valid_args(concerns="dilutive_financing, post_close_news")
+    )
+    assert result.concerns == ("dilutive_financing", "post_close_news")
+
+
+def test_build_classification_coerces_concerns_semicolon_separated_string() -> None:
+    result = _build_classification(
+        _valid_args(concerns="dilutive_financing; post_close_news")
+    )
+    assert result.concerns == ("dilutive_financing", "post_close_news")
+
+
+def test_build_classification_treats_concerns_none_as_empty() -> None:
+    result = _build_classification(_valid_args(concerns=None))
+    assert result.concerns == ()
+
+
+def test_build_classification_drops_unknown_concern_strings_after_split() -> None:
+    result = _build_classification(
+        _valid_args(concerns="dilutive_financing, made_up_label")
+    )
+    assert result.concerns == ("dilutive_financing",)
+
+
+def test_build_classification_rejects_concerns_dict() -> None:
+    with pytest.raises(ValueError, match="concerns must be a list"):
+        _build_classification(_valid_args(concerns={"bad": "shape"}))
