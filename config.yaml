@@ -24,7 +24,7 @@ risk:
     require_profitable_prior_exit: true # no revenge trades — last exit must have PnL > 0 to re-enter
   # --- Phase 4g automatic rehab tier (the methodology: "when you're in a drawdown, trade smaller") ---
   rehab:
-    enabled: true                                       # master switch; set false to always use base caps
+    enabled: false                                       # master switch; set false to always use base caps
     rehab_consecutive_red_days: 2                       # 2 back-to-back reds → REHAB
     rehab_lookback_days: 10                             # drawdown window (trading days looked back in journal)
     rehab_drawdown_multiple_of_daily_loss: 3.0          # cumulative drawdown ≥ 3 × max_daily_loss → REHAB
@@ -93,7 +93,7 @@ universe:
   price_min: 1.0
   price_max: 20.0
   float_max: 20_000_000
-  gap_pct_min: 4.0
+  gap_pct_min: 10.0
   rvol_min: 5.0
   premarket_vol_min: 300_000
 
@@ -112,11 +112,19 @@ strategies:
     vwap_extension_grace_minutes: 15     # bypass extended_from_vwap rejection during first N minutes after session open (0 disables)
     extended_from_vwap_atr_multiple: 20.0 # Phase 6.6: raised from 3.0 — Day 2 BATL precedent + Day 3 paper trading rejected normal continuation setups
     window_end: "10:00"                  # Phase 6.7: evaluate bars only before this HH:MM (NY-local). Widen for off-hours testing (e.g. "16:00"). Start is always 09:30 ET.
+    # Phase 12.4 — strategy-differentiation. Strict Ross framework: gap-and-go requires confirmed catalyst.
+    catalyst_required: true              # tickers without confirmed catalyst (LLM qualifies=true) are NOT admitted to this strategy
+    recent_rvol_min: 2.0                 # breakout-bar volume must be >= N × prior-window-average for signal to fire
+    recent_rvol_window_bars: 20          # rolling average over last N 1-min bars (sanity floor: 5)
   momentum:
     enabled: true
     flag_max_pullback_pct: 5.0
     extended_from_vwap_atr_multiple: 20.0 # Phase 6.6: raised from 3.0 — 10 rejections (ELPW/TORO/ZENA/BTM/ENVB) on Day 3 against normal continuation
     window_end: "16:00"                  # Phase 6.7: evaluate bars only before this HH:MM (NY-local). Widen for off-hours testing (e.g. "16:00"). Start is always 09:30 ET.
+    # Phase 12.4 — strategy-differentiation. Ross treats catalyst as ideal-but-not-required for momentum continuation; the bull-flag pattern is the entry signal in its own right.
+    catalyst_required: false             # tickers without confirmed catalyst still admitted to this strategy
+    recent_rvol_min: 2.0                 # Ross's published 2× threshold for momentum entries
+    recent_rvol_window_bars: 20
 
 ibkr:
   host: 127.0.0.1
@@ -147,7 +155,7 @@ catalyst_classifier:
   llm:
     enabled: true                            # Phase 12 default: LLM is on
     model: "claude-sonnet-4-6"               # pinned model; bump deliberately
-    timeout_seconds: 12.0                    # per-ticker LLM call timeout (max_retries=0 — see llm_client.py)
+    timeout_seconds: 30.0                    # per-ticker LLM call timeout (max_retries=0 — see llm_client.py)
     max_input_tokens: 4000                   # ceiling on prompt size; oldest headlines truncate when exceeded
     cost_soft_cap_usd_per_day: 5.0           # one-time daily warning when crossed
     cost_hard_cap_usd_per_day: 25.0          # classifier returns deterministic non-qualify until NY-midnight rollover
@@ -168,7 +176,7 @@ catalyst_classifier:
 exit_advisor:
   enabled: true              # master switch — false = no hook calls, no overhead, no risk to existing behaviour
   hook_acts: true            # when true, actionable recommendations execute against IBKR; when false, log-only diagnostic mode
-  timeout_seconds: 10.0       # hook-call wall-clock cap; on timeout the call is treated as failed and an event is logged
+  timeout_seconds: 30.0       # hook-call wall-clock cap; on timeout the call is treated as failed and an event is logged
   log_skipped_events: true    # log every "skipped" advisor response (high volume — flip false in busy sessions)
   # --- Live LLM advisor (bot/exit_advisor/advisor) — only consumed when enabled=true.
   # ANTHROPIC_API_KEY is read from the environment at bootstrap; never put it here.

@@ -669,6 +669,17 @@ class GapAndGoConfig(BaseModel):
     opening range breakout *as* the gap-and-go entry; VWAP distance is
     context, not a gate in the opening window. A value of 0 disables the
     grace period and restores pre-5.5 behaviour.
+
+    Phase 12.4 adds the strategy-differentiation knobs:
+
+    * ``catalyst_required``: gap-and-go is the strict-Ross-framework
+      strategy that requires a confirmed catalyst (LLM ``qualifies=True``)
+      for watchlist admission. Default ``True``.
+    * ``recent_rvol_min`` / ``recent_rvol_window_bars``: breakout-bar
+      volume must be ≥ ``recent_rvol_min`` × the rolling N-bar average
+      for the signal to fire. Validates volume *health* at the moment
+      of entry, not just at scanner-pillar admission. Default 2.0×
+      over 20 1-minute bars.
     """
 
     enabled: bool = True
@@ -686,6 +697,11 @@ class GapAndGoConfig(BaseModel):
     # tests / off-hours experimentation can widen this (e.g. ``"16:00"``)
     # without touching code. Validator enforces HH:MM + end > 09:30.
     window_end: str = "16:00"
+    # Phase 12.4 — strategy-differentiation. Strict Ross framework: gap-and-go
+    # requires confirmed catalyst.
+    catalyst_required: bool = True
+    recent_rvol_min: float = 2.0
+    recent_rvol_window_bars: int = 20
 
     @field_validator("vwap_extension_grace_minutes")
     @classmethod
@@ -722,9 +738,46 @@ class GapAndGoConfig(BaseModel):
         _parse_strategy_hh_mm("strategies.gap_and_go.window_end", value)
         return value
 
+    @field_validator("recent_rvol_min")
+    @classmethod
+    def _validate_recent_rvol_min(cls, value: float) -> float:
+        """Phase 12.4 — breakout-bar volume threshold must be > 0."""
+        if value <= 0:
+            raise ValueError(
+                "strategies.gap_and_go.recent_rvol_min must be > 0 "
+                f"(got {value}); the recent-window RVOL gate compares the "
+                "candidate bar's volume to the prior-N-bar average, so a "
+                "non-positive threshold would always pass and defeat the gate."
+            )
+        return value
+
+    @field_validator("recent_rvol_window_bars")
+    @classmethod
+    def _validate_recent_rvol_window_bars(cls, value: int) -> int:
+        """Phase 12.4 — sanity floor of 5 bars; below that the average is too noisy."""
+        if value < 5:
+            raise ValueError(
+                "strategies.gap_and_go.recent_rvol_window_bars must be >= 5 "
+                f"(got {value}); below 5 bars the rolling average is too "
+                "noisy to anchor a 2× threshold meaningfully."
+            )
+        return value
+
 
 class MomentumConfig(BaseModel):
-    """Momentum / bull-flag strategy parameters."""
+    """Momentum / bull-flag strategy parameters.
+
+    Phase 12.4 adds the strategy-differentiation knobs:
+
+    * ``catalyst_required``: momentum is the technical-pattern strategy
+      that admits tickers regardless of catalyst confirmation. Ross's
+      framework treats catalyst as "ideal but not required" for
+      momentum continuation setups -- the bull-flag pattern itself is
+      the entry signal. Default ``False``.
+    * ``recent_rvol_min`` / ``recent_rvol_window_bars``: same shape as
+      gap-and-go. Default 2.0× over 20 1-minute bars (Ross's published
+      threshold for momentum entries).
+    """
 
     enabled: bool = True
     flag_max_pullback_pct: float = 5.0
@@ -737,6 +790,12 @@ class MomentumConfig(BaseModel):
     # Default ``11:30`` preserves the pre-6.7 hardcoded cutoff; widen for
     # off-hours testing (``"16:00"``) without touching code.
     window_end: str = "16:00"
+    # Phase 12.4 — strategy-differentiation. Momentum admits tickers
+    # without catalyst confirmation; the bull-flag pattern is the entry
+    # signal in its own right.
+    catalyst_required: bool = False
+    recent_rvol_min: float = 2.0
+    recent_rvol_window_bars: int = 20
 
     @field_validator("extended_from_vwap_atr_multiple")
     @classmethod
@@ -760,6 +819,31 @@ class MomentumConfig(BaseModel):
     def _validate_window_end(cls, value: str) -> str:
         """Phase 6.7 — HH:MM, strictly after 09:30 market open."""
         _parse_strategy_hh_mm("strategies.momentum.window_end", value)
+        return value
+
+    @field_validator("recent_rvol_min")
+    @classmethod
+    def _validate_recent_rvol_min(cls, value: float) -> float:
+        """Phase 12.4 — breakout-bar volume threshold must be > 0."""
+        if value <= 0:
+            raise ValueError(
+                "strategies.momentum.recent_rvol_min must be > 0 "
+                f"(got {value}); the recent-window RVOL gate compares the "
+                "candidate bar's volume to the prior-N-bar average, so a "
+                "non-positive threshold would always pass and defeat the gate."
+            )
+        return value
+
+    @field_validator("recent_rvol_window_bars")
+    @classmethod
+    def _validate_recent_rvol_window_bars(cls, value: int) -> int:
+        """Phase 12.4 — sanity floor of 5 bars; below that the average is too noisy."""
+        if value < 5:
+            raise ValueError(
+                "strategies.momentum.recent_rvol_window_bars must be >= 5 "
+                f"(got {value}); below 5 bars the rolling average is too "
+                "noisy to anchor a 2× threshold meaningfully."
+            )
         return value
 
 
