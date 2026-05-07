@@ -169,6 +169,15 @@ class Signal:
     pullback_lookback_bars: int | None = None
     bars_available_for_lookback: int | None = None
     vwap_at_entry: float | None = None
+    # Phase 12.5: a "current market" proxy for the LMT buffer ceiling
+    # calculation. When set, the executor's percentage cap is anchored
+    # on ``min(entry, market_anchor_price)`` rather than on ``entry``
+    # alone -- preventing IBKR Error 202 cancellations on breakout-fade
+    # bars where the breakout close sits well above current market.
+    # Strategies populate this with the prior bar close (the most
+    # recent fully-quoted price before the candidate breakout bar).
+    # ``None`` falls back to the legacy entry-only ceiling.
+    market_anchor_price: float | None = None
 
     @property
     def risk_per_share(self) -> float:

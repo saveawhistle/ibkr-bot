@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -138,20 +139,25 @@ def _compute_lmt_buffer_breakdown(
     buffer_floor_usd: float,
     buffer_cap_usd: float,
     max_pct: float,
+    anchor_price: float | None = None,
 ) -> _LmtBufferBreakdown:
-    """Phase 8.2 + 10.6 — full clamp resolution for the LMT entry buffer.
+    """Phase 8.2 + 10.6 + 12.5 — full clamp resolution for the LMT entry buffer.
 
     Pipeline:
 
     * ``pct_raw = entry × buffer_pct / 100`` — the raw percentage buffer.
     * ``floor_value = buffer_floor_usd`` — penny-stock spread floor.
-    * ``ceiling_value = min(buffer_cap_usd, entry × max_pct / 100)`` —
+    * ``ceiling_value = min(buffer_cap_usd, ANCHOR × max_pct / 100)`` —
       the binding upper bound. Combines the legacy fixed-dollar
-      slippage cap (Phase 8.2) with the new percentage cap (Phase 10.6).
-      The percentage cap prevents the floor from producing LMTs above
-      IBKR's ~9.8% aggressive-LMT threshold on low-priced names; the
-      dollar cap remains the slippage guard for halt-reopen scenarios
-      on higher-priced names.
+      slippage cap (Phase 8.2) with the percentage cap (Phase 10.6).
+      Phase 12.5: the percentage cap is anchored on
+      ``min(entry, anchor_price)`` rather than ``entry`` alone --
+      when the strategy's entry sits well above the most recent
+      market quote (breakout bar's close > prior offer), the original
+      entry-anchored ceiling could still produce LMTs above IBKR's
+      ~9.78%-above-current-market threshold and trigger Error 202.
+      ``anchor_price=None`` falls back to the legacy entry-only
+      ceiling (preserves pre-12.5 numerics for tests).
     * Apply: ``buffer = min(max(pct_raw, floor_value), ceiling_value)``.
 
     Clamp determination (priority order — ceiling wins ties since it's
@@ -165,7 +171,11 @@ def _compute_lmt_buffer_breakdown(
     """
     pct_raw = entry_price * (buffer_pct / 100.0)
     floor_value = buffer_floor_usd
-    pct_ceiling = entry_price * (max_pct / 100.0)
+    if anchor_price is not None and anchor_price > 0 and anchor_price < entry_price:
+        ceiling_anchor = anchor_price
+    else:
+        ceiling_anchor = entry_price
+    pct_ceiling = ceiling_anchor * (max_pct / 100.0)
     ceiling_value = min(buffer_cap_usd, pct_ceiling)
 
     pre_ceiling = max(floor_value, pct_raw)
@@ -209,6 +219,62 @@ def _compute_lmt_buffer(
         buffer_cap_usd=buffer_cap_usd,
         max_pct=max_pct,
     ).final
+
+
+# Phase 12.5 — IBKR Error 202 message regex. Sample:
+#   "Order Canceled - reason:We cannot accept an order at a limit price at or
+#    more aggressive than 1.6046172. Please submit your order using a limit
+#    price that is closer to the current market price of 1.4614. ..."
+# We extract the FIRST decimal -- that's IBKR's accepted ceiling.
+_AGGRESSIVE_LIMIT_PRICE_PATTERN = re.compile(
+    r"limit price at or more aggressive than\s+([0-9]+\.?[0-9]*)",
+    re.IGNORECASE,
+)
+
+
+def _parse_aggressive_limit_ceiling(error_string: str) -> float | None:
+    """Extract IBKR's accepted-ceiling price from an Error 202 message, or None.
+
+    Returns ``None`` when the message doesn't match the expected pattern
+    (e.g. a different 202 reason, or IBKR changed the wording in a future
+    TWS release). Callers treat ``None`` as "can't recover, give up".
+    """
+    if not error_string:
+        return None
+    match = _AGGRESSIVE_LIMIT_PRICE_PATTERN.search(error_string)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class _LmtRetryContext:
+    """Phase 12.5 — captured per-placement state for Error 202 retry.
+
+    Stored in ``Executor._lmt_retry_contexts`` keyed on parent_order_id at
+    placement time. The ``ib.errorEvent`` handler looks up by the cancelled
+    order's reqId; when found AND ``retried`` is False, it computes a new
+    LMT from the IBKR-supplied ceiling and re-submits the bracket once.
+
+    ``retried`` flips True before the re-submission so a second 202 on the
+    new bracket can't trigger another retry (avoids an infinite loop if
+    market keeps moving against us between submissions).
+    """
+
+    symbol: str
+    contract: Contract
+    entry: float
+    stop: float
+    target: float | None
+    shares: int
+    strategy: str
+    original_limit_price: float
+    market_anchor_price: float | None
+    placement_bar_ts: datetime
+    retried: bool = False
 
 
 @dataclass
@@ -273,6 +339,24 @@ class Executor:
         # deterministically wait for them to complete instead of racing the
         # aiosqlite commit thread with ``asyncio.sleep(0)``.
         self._pending_fill_tasks: set[asyncio.Task[None]] = set()
+        # Phase 12.5 — per-parent-order retry context for IBKR Error 202
+        # (aggressive-LMT cancel) recovery. Keyed on parent_order_id of the
+        # initial entry-LMT placement. Populated on placement, consumed by
+        # the ``ib.errorEvent`` handler when 202 fires for a tracked order,
+        # mutated on retry (``retried=True`` blocks a second pass for the
+        # same order chain).
+        self._lmt_retry_contexts: dict[int, _LmtRetryContext] = {}
+        # Subscribe to IBKR's error event stream so the handler runs inline
+        # when 202 fires, NOT after the next bar tick (which would be too
+        # late: the breakout window is ~1 minute and the strategy may not
+        # re-emit on the next bar). Defensive ``getattr``: synthetic test
+        # fakes don't carry an ``errorEvent`` attribute, and we don't want
+        # the executor to refuse construction in those cases. The Phase
+        # 12.5 retry tests inject their own dispatch path.
+        if self._settings.execution.lmt_aggressive_limit_retry:
+            error_event = getattr(self._ibkr.ib, "errorEvent", None)
+            if error_event is not None:
+                error_event += self._on_ibkr_error_event
 
     @property
     def risk_engine(self) -> RiskEngine:
@@ -436,6 +520,9 @@ class Executor:
                 stop=signal.stop,
                 target=runner_target,
                 shares=shares,
+                # Phase 12.5 — pass the strategy's market anchor through to
+                # the buffer-ceiling calculation. None falls back to entry.
+                market_anchor_price=signal.market_anchor_price,
             )
             assert bracket.parent is not None
             assert bracket.stop is not None
@@ -445,6 +532,25 @@ class Executor:
             parent_order_id = bracket.parent.order.orderId
             stop_order_id = bracket.stop.order.orderId
             target_order_id = bracket.target.order.orderId if bracket.target is not None else 0
+            # Phase 12.5 — record the retry context so the ``ib.errorEvent``
+            # handler can recover from an Error 202 cancel without losing
+            # the trade. Only registered when the retry is enabled in
+            # config (otherwise the handler isn't subscribed).
+            if self._settings.execution.lmt_aggressive_limit_retry:
+                self._lmt_retry_contexts[parent_order_id] = _LmtRetryContext(
+                    symbol=symbol,
+                    contract=contract,
+                    entry=signal.entry,
+                    stop=signal.stop,
+                    target=runner_target,
+                    shares=shares,
+                    strategy=signal.strategy,
+                    # ``lmtPrice`` is typed as ``float | Decimal | None`` upstream
+                    # but always concrete on the LMT path we just placed.
+                    original_limit_price=float(bracket.parent.order.lmtPrice or 0.0),
+                    market_anchor_price=signal.market_anchor_price,
+                    placement_bar_ts=signal.timestamp,
+                )
         elif entry_order_type == "MKT":
             # Phase 6.14.1 path — atomic 2-leg [parent MKT + full-size
             # STP]. The 50%-share scale-out LMT is planted post-fill
@@ -758,6 +864,177 @@ class Executor:
                 reason="not_filled_in_breakout_bar",
             )
         return True
+
+    def _on_ibkr_error_event(
+        self,
+        req_id: int,
+        error_code: int,
+        error_string: str,
+        contract: Contract | None = None,
+    ) -> None:
+        """Phase 12.5 — IBKR error-event listener for the Error 202 retry path.
+
+        Fires synchronously from ib_async's eventkit dispatcher when TWS
+        sends an error message. We filter for code 202 with the
+        "limit price at or more aggressive" reason; everything else is a
+        no-op. Note that 202 carries other reasons (e.g. "Cancelled by
+        user") which we MUST NOT treat as a retry trigger -- the regex
+        match against the price-suggestion text is the discriminator.
+
+        On match: look up the retry context by ``reqId`` (== parent order
+        id at placement time); if not found OR already retried, skip.
+        Parse the IBKR-supplied ceiling, compute a new LMT one tick below
+        it, re-submit the bracket once, and update the position store
+        with the new parent order id so ``expire_unfilled_entry`` keys
+        on the right trade.
+
+        Defensive: any exception in the handler is caught and logged.
+        ib_async's eventkit will keep firing other listeners; a crash in
+        our handler must not poison the broker connection.
+        """
+        if error_code != 202:
+            return
+        suggested_ceiling = _parse_aggressive_limit_ceiling(error_string)
+        if suggested_ceiling is None:
+            # Code 202 with a non-aggressive-limit reason (e.g. operator-
+            # cancelled, after-hours rejection). Not our retry case.
+            return
+        context = self._lmt_retry_contexts.get(req_id)
+        if context is None:
+            # Error 202 fired for an order we don't track (e.g. a
+            # post-scaleout LMT, or a different client's order on a
+            # shared session). No-op.
+            return
+        if context.retried:
+            _log.warning(
+                "executor.lmt_aggressive_limit_retry_failed",
+                symbol=context.symbol,
+                strategy=context.strategy,
+                parent_order_id=req_id,
+                reason="already_retried",
+                suggested_ceiling=suggested_ceiling,
+            )
+            self._lmt_retry_contexts.pop(req_id, None)
+            return
+        try:
+            self._do_lmt_retry(req_id, context, suggested_ceiling, error_string)
+        except Exception as exc:  # noqa: BLE001 - retry must never poison the connection
+            _log.error(
+                "executor.lmt_aggressive_limit_retry_crashed",
+                symbol=context.symbol,
+                parent_order_id=req_id,
+                error=str(exc),
+            )
+
+    def _do_lmt_retry(
+        self,
+        original_parent_id: int,
+        context: _LmtRetryContext,
+        suggested_ceiling: float,
+        error_string: str,
+    ) -> None:
+        """Phase 12.5 — execute the actual retry: cancel leftovers + re-place.
+
+        Split out from ``_on_ibkr_error_event`` so the try/except wrapper
+        stays narrow and the happy path reads cleanly.
+        """
+        # Compute the corrected LMT: one tick below IBKR's accepted
+        # ceiling, but never below ``entry`` (a sub-entry LMT would
+        # never fill marketable). Tick rounding handled inside
+        # ``_place_bracket`` for the placed price; we round here for
+        # the log + the >= entry guard.
+        new_lmt = _round_to_tick(suggested_ceiling - 0.01)
+        if new_lmt <= context.entry:
+            _log.warning(
+                "executor.lmt_aggressive_limit_retry_failed",
+                symbol=context.symbol,
+                strategy=context.strategy,
+                parent_order_id=original_parent_id,
+                reason="suggested_ceiling_below_entry",
+                suggested_ceiling=suggested_ceiling,
+                entry=context.entry,
+                hint=(
+                    "IBKR's market-anchored ceiling sits below the strategy's "
+                    "entry; the breakout already faded past the entry price. "
+                    "Skip retry -- next bar's strategy decision applies."
+                ),
+            )
+            self._lmt_retry_contexts.pop(original_parent_id, None)
+            return
+
+        _log.info(
+            "executor.lmt_aggressive_limit_detected",
+            symbol=context.symbol,
+            strategy=context.strategy,
+            original_parent_order_id=original_parent_id,
+            original_limit_price=context.original_limit_price,
+            suggested_ceiling=suggested_ceiling,
+            entry=context.entry,
+            error_string=error_string,
+        )
+
+        # Mark retried BEFORE the new placement so a fast second 202 on
+        # the new bracket can't race us into a third attempt.
+        context.retried = True
+
+        # Cancel any leftover trades for this symbol. IBKR has already
+        # cancelled the original parent and stop (that's why we got the
+        # 202); these are belt-and-suspenders in case the bracket sat
+        # in some intermediate state.
+        existing_bracket = self._active_trades.get(context.symbol)
+        if existing_bracket is not None:
+            self._cancel_trade_silently(existing_bracket.parent)
+            self._cancel_trade_silently(existing_bracket.stop)
+            self._cancel_trade_silently(existing_bracket.target)
+
+        # Re-place the bracket at the corrected LMT. Force-override
+        # bypasses the buffer chain so we land exactly at IBKR's ceiling
+        # minus one tick.
+        new_bracket = self._place_bracket(
+            contract=context.contract,
+            entry=context.entry,
+            stop=context.stop,
+            target=context.target,
+            shares=context.shares,
+            market_anchor_price=context.market_anchor_price,
+            force_limit_price=new_lmt,
+        )
+        # ``parent`` is non-None right after a successful ``_place_bracket``;
+        # mypy can't narrow the dataclass field on its own.
+        assert new_bracket.parent is not None
+        new_parent_id = new_bracket.parent.order.orderId
+
+        # Swap the active-trades pointer to the new bracket and rewire
+        # fill handlers. Without this, the post-fill flow would still
+        # think the cancelled trade is the live one.
+        self._active_trades[context.symbol] = new_bracket
+        self._wire_fill_handlers(context.symbol, new_bracket)
+
+        # The position record's ``parent_order_id`` field is observability
+        # metadata; ``expire_unfilled_entry`` resolves the live trade via
+        # ``self._active_trades.get(symbol)`` which we already swapped
+        # above. So we don't need a position-store mutation -- the new
+        # bracket is the canonical "live order" lookup. The position's
+        # original parent_order_id remains in the journal for forensic
+        # correlation with the cancel event.
+
+        # Move the retry context to the new parent_order_id so any
+        # subsequent 202 on the new order is recognized as already-
+        # retried and rejected with the proper log.
+        self._lmt_retry_contexts.pop(original_parent_id, None)
+        self._lmt_retry_contexts[new_parent_id] = context
+
+        _log.info(
+            "executor.lmt_aggressive_limit_retry",
+            symbol=context.symbol,
+            strategy=context.strategy,
+            original_parent_order_id=original_parent_id,
+            new_parent_order_id=new_parent_id,
+            original_limit_price=context.original_limit_price,
+            new_limit_price=new_lmt,
+            suggested_ceiling=suggested_ceiling,
+            entry=context.entry,
+        )
 
     async def _record_broker_rejection(self, symbol: str, *, error_code: int | None) -> None:
         """Phase 9.6 — schedule the rejection counter update + drop event.
@@ -1078,6 +1355,8 @@ class Executor:
         stop: float,
         target: float | None,
         shares: int,
+        market_anchor_price: float | None = None,
+        force_limit_price: float | None = None,
     ) -> _BracketTrades:
         """Place a 2- or 3-leg bracket with the mandatory ``transmit`` flag sequence.
 
@@ -1122,9 +1401,18 @@ class Executor:
             buffer_floor_usd=exec_cfg.lmt_buffer_usd_floor,
             buffer_cap_usd=exec_cfg.lmt_buffer_usd_cap,
             max_pct=exec_cfg.lmt_buffer_max_pct,
+            anchor_price=market_anchor_price,
         )
         buffer = buffer_breakdown.final
-        limit_px = _round_to_tick(entry_px + buffer)
+        # Phase 12.5 — when the retry path forces an explicit LMT (because
+        # IBKR told us its accepted ceiling), bypass the buffer chain and
+        # use the override directly. ``buffer`` becomes the implied
+        # back-computed value for log observability only.
+        if force_limit_price is not None:
+            limit_px = _round_to_tick(force_limit_price)
+            buffer = round(limit_px - entry_px, 4)
+        else:
+            limit_px = _round_to_tick(entry_px + buffer)
 
         parent = LimitOrder("BUY", shares, limit_px)
         parent.transmit = False
@@ -1179,6 +1467,18 @@ class Executor:
             final_buffer=round(buffer, 4),
             stop_price=stop_px,
             target_price=target_px,
+            # Phase 12.5: which anchor drove the percentage ceiling so an
+            # operator can grep for "ceiling anchored on prior_close" runs.
+            market_anchor_price=(
+                round(market_anchor_price, 4) if market_anchor_price is not None else None
+            ),
+            # Phase 12.5: when the retry path forced an explicit LMT (after
+            # an Error 202 cancel of the original placement), this is the
+            # IBKR-supplied ceiling (minus a tick) we used. ``None`` for
+            # initial placements -- only the retry sets it.
+            forced_limit_price=(
+                round(force_limit_price, 4) if force_limit_price is not None else None
+            ),
         )
         return _BracketTrades(parent=parent_trade, stop=stop_trade, target=target_trade)
 
