@@ -44,6 +44,12 @@ def _settings(float_max: int = 20_000_000, rvol_min: float = 0.0) -> Settings:
     this, a recent ERNA override entry combined with the live config
     leaving the gate open silently bypassed the news fetch and broke
     ``test_news_fallback_uses_yfinance_when_finnhub_returns_empty``.
+
+    Phase 12.4: pin BOTH strategies to ``catalyst_required=True`` so
+    pre-12.4 tests preserve the strict "no catalyst → drop"
+    invariant they were written against. The new per-strategy
+    differentiation tests live below in the dedicated section and
+    set ``catalyst_required`` explicitly per strategy.
     """
     base = Settings(universe=UniverseConfig(float_max=float_max, rvol_min=rvol_min))
     return base.model_copy(
@@ -57,6 +63,16 @@ def _settings(float_max: int = 20_000_000, rvol_min: float = 0.0) -> Settings:
                 }
             ),
             "testing": base.testing.model_copy(update={"allow_catalyst_overrides": False}),
+            "strategies": base.strategies.model_copy(
+                update={
+                    "gap_and_go": base.strategies.gap_and_go.model_copy(
+                        update={"catalyst_required": True}
+                    ),
+                    "momentum": base.strategies.momentum.model_copy(
+                        update={"catalyst_required": True}
+                    ),
+                }
+            ),
         }
     )
 
@@ -459,12 +475,29 @@ async def test_scanner_classifier_filters_stale_fetched_news() -> None:
         summary="",
         category="company",
     )
-    settings = Settings(
+    base = Settings(
         universe=UniverseConfig(float_max=20_000_000, rvol_min=0.0),
         data_sources=DataSourcesSettings(
             news_lookback_hours=96,
             news_max_age_hours_for_classify=72,
         ),
+    )
+    # Phase 12.4: force both strategies to require catalyst so the
+    # original "no_catalyst → drop" assertion holds. Without this the
+    # default momentum.catalyst_required=False would keep the hit alive.
+    settings = base.model_copy(
+        update={
+            "strategies": base.strategies.model_copy(
+                update={
+                    "gap_and_go": base.strategies.gap_and_go.model_copy(
+                        update={"catalyst_required": True}
+                    ),
+                    "momentum": base.strategies.momentum.model_copy(
+                        update={"catalyst_required": True}
+                    ),
+                }
+            ),
+        }
     )
     scanner = IBKRScanner(
         ibkr=_mock_ibkr(["ACME"]),
