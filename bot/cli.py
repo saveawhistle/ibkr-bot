@@ -70,6 +70,21 @@ from bot.scanning.float_source import (
     FloatSource,
 )
 from bot.scanning.llm_catalyst_classifier import bootstrap_catalyst_classifier
+from bot.scanning.manual_watchlist import (
+    DEFAULT_STORE_PATH as _MANUAL_WATCHLIST_DEFAULT_PATH,
+)
+from bot.scanning.manual_watchlist import (
+    ManualWatchlistEntry,
+)
+from bot.scanning.manual_watchlist import (
+    load_active_entries as load_active_manual_watchlist_entries,
+)
+from bot.scanning.manual_watchlist import (
+    remove_entry as remove_manual_watchlist_entry,
+)
+from bot.scanning.manual_watchlist import (
+    upsert_entry as upsert_manual_watchlist_entry,
+)
 from bot.scanning.scanner import IBKRScanner, ScanHit
 from bot.signal_bus import SignalBus
 from bot.strategies.base import RejectedCandidate, Signal
@@ -662,6 +677,131 @@ def inject_catalyst(
         f"({_format_duration(expires_dt - now_utc)} from now)"
     )
     _console.print(f"[dim]Store:[/dim] {_OVERRIDES_DEFAULT_PATH}")
+
+
+@app.command("watch-symbol")
+def watch_symbol(
+    symbol: str = typer.Argument(..., help="Ticker symbol to manually watch (e.g. ATRA)."),
+    duration_hours: float = typer.Option(
+        6.0,
+        "--duration-hours",
+        help="How long the entry stays active. Default 6h. Mutually exclusive with --expires-at.",
+    ),
+    expires_at: str | None = typer.Option(
+        None,
+        "--expires-at",
+        help="Explicit ISO-8601 expiration timestamp (e.g. 2026-05-07T16:00:00-04:00).",
+    ),
+    note: str | None = typer.Option(
+        None,
+        "--note",
+        help="Free-form description for forensic clarity (e.g. 'FDA agreement on tab-cel').",
+    ),
+) -> None:
+    """PAPER-TRADING ONLY: add a symbol to the watchlist regardless of the IBKR scanner.
+
+    Scanner pillars (price / gap / premarket-vol / float / rvol / catalyst)
+    are all bypassed for the manual entry — the symbol shows up in the
+    watchlist on the next 5-minute rescan with bars subscribed and
+    strategies evaluating it. The risk engine still gates any signal,
+    so this is observability + opportunity only, not a way around the
+    safety net.
+
+    SAFETY: gated by ``testing.allow_catalyst_overrides`` in config.yaml.
+    The flag MUST stay ``false`` in any live-trading config. If the flag
+    is off, this command exits non-zero and writes nothing.
+
+    Entries auto-expire at ``expires_at`` (default: now + 6 hours) so a
+    forgotten add can't leak into future sessions. Re-adding the same
+    symbol replaces (not appends) the prior entry.
+    """
+    settings = get_settings()
+    configure_logging(settings)
+
+    if not settings.testing.allow_catalyst_overrides:
+        typer.echo(
+            "ERROR: Manual watchlist is disabled.\n"
+            "testing.allow_catalyst_overrides is false in config.yaml\n"
+            "Set to true in PAPER TRADING configs only. NEVER enable in live.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    now_utc = datetime.now(UTC)
+    ny_tz = ZoneInfo(settings.session.timezone)
+    if expires_at is not None:
+        try:
+            expires_dt = datetime.fromisoformat(expires_at)
+        except ValueError as exc:
+            typer.echo(
+                f"ERROR: --expires-at must be ISO-8601, got {expires_at!r}: {exc}",
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
+        if expires_dt.tzinfo is None:
+            expires_dt = expires_dt.replace(tzinfo=ny_tz)
+    else:
+        if duration_hours <= 0:
+            typer.echo(f"ERROR: --duration-hours must be > 0, got {duration_hours}.", err=True)
+            raise typer.Exit(code=1)
+        expires_dt = now_utc + timedelta(hours=duration_hours)
+
+    if expires_dt <= now_utc:
+        typer.echo(
+            f"ERROR: expiration {expires_dt.isoformat()} is in the past; "
+            "an already-expired entry would never be applied.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    entry = ManualWatchlistEntry(
+        symbol=symbol.upper(),
+        expires_at=expires_dt,
+        note=note,
+        added_at=now_utc,
+        added_by="cli",
+    )
+    upsert_manual_watchlist_entry(entry, _MANUAL_WATCHLIST_DEFAULT_PATH)
+
+    _log.info(
+        "manual_watchlist.entry_added",
+        symbol=entry.symbol,
+        expires_at=entry.expires_at.isoformat(),
+        added_at=entry.added_at.isoformat(),
+        note=entry.note,
+        added_by=entry.added_by,
+    )
+
+    expires_local = expires_dt.astimezone(ny_tz)
+    _console.print(
+        f"[green]Manual watchlist entry added:[/green] [bold]{entry.symbol}[/bold]"
+    )
+    if note:
+        _console.print(f"[dim]Note:[/dim] {note}")
+    _console.print(
+        f"[dim]Expires:[/dim] {expires_local.strftime('%Y-%m-%d %H:%M %Z')} "
+        f"({_format_duration(expires_dt - now_utc)} from now)"
+    )
+    _console.print(f"[dim]Store:[/dim] {_MANUAL_WATCHLIST_DEFAULT_PATH}")
+
+
+@app.command("unwatch-symbol")
+def unwatch_symbol(
+    symbol: str = typer.Argument(..., help="Ticker symbol to remove from the manual watchlist."),
+) -> None:
+    """Remove a manual watchlist entry. Idempotent (no error if symbol absent)."""
+    settings = get_settings()
+    configure_logging(settings)
+
+    upper = symbol.upper()
+    removed = remove_manual_watchlist_entry(upper, _MANUAL_WATCHLIST_DEFAULT_PATH)
+    if removed:
+        _log.info("manual_watchlist.entry_removed", symbol=upper)
+        _console.print(f"[green]Manual watchlist entry removed:[/green] [bold]{upper}[/bold]")
+    else:
+        _console.print(
+            f"[dim]No active manual watchlist entry for {upper}; nothing to remove.[/dim]"
+        )
 
 
 def _format_duration(delta: timedelta) -> str:
@@ -1273,6 +1413,7 @@ async def _status() -> None:
         _print_reentries_table(store, settings)
         _print_execution_post_scaleout(settings)
         _print_logging_destination(settings)
+        _print_manual_watchlist_summary(settings)
         await _print_status_rehab_summary(settings=settings, rehab_engine=rehab_engine)
     finally:
         await journal.close()
@@ -1291,6 +1432,35 @@ def _print_logging_destination(settings: Settings) -> None:
         _console.print("[dim]Logging: stdout only (set logging.path to enable file logs).[/dim]")
         return
     _console.print(f"[dim]Logging: stdout + {path.as_posix()} (next session).[/dim]")
+
+
+def _print_manual_watchlist_summary(settings: Settings) -> None:
+    """Render active manual watchlist entries as a one-line per symbol summary.
+
+    Silent when no entries are active or the gate is off — most operators
+    don't use the escape hatch and don't need to see the absence noted
+    every status invocation.
+    """
+    if not settings.testing.allow_catalyst_overrides:
+        return
+    now_utc = datetime.now(UTC)
+    ny_tz = ZoneInfo(settings.session.timezone)
+    active = load_active_manual_watchlist_entries(
+        now=now_utc, path=_MANUAL_WATCHLIST_DEFAULT_PATH
+    )
+    if not active:
+        return
+    _console.print(f"[bold]Manual watchlist:[/bold] {len(active)} active entry(s)")
+    for entry in active:
+        expires_local = entry.expires_at.astimezone(ny_tz)
+        ttl = _format_duration(entry.expires_at - now_utc)
+        line = (
+            f"  [cyan]{entry.symbol}[/cyan] expires "
+            f"{expires_local.strftime('%H:%M %Z')} ({ttl} left)"
+        )
+        if entry.note:
+            line += f" — [dim]{entry.note}[/dim]"
+        _console.print(line)
 
 
 def _print_execution_post_scaleout(settings: Settings) -> None:

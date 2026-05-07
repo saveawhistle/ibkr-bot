@@ -33,6 +33,13 @@ from bot.scanning.llm_catalyst_classifier import (
     ClassificationResult,
     LLMCatalystClassifier,
 )
+from bot.scanning.manual_watchlist import (
+    MANUAL_CATALYST_SENTINEL,
+    ManualWatchlistEntry,
+)
+from bot.scanning.manual_watchlist import (
+    load_active_entries as load_active_manual_watchlist,
+)
 from bot.scanning.yfinance_news import fetch_yfinance_news
 
 _ENRICHMENT_TIMEOUT_SECONDS_DEFAULT = 2.0
@@ -67,6 +74,11 @@ class ScanHit:
     reasons: list[str] = field(default_factory=list)
     rvol: float | None = None
     avg_daily_volume: int | None = None
+    manual: bool = False
+    """True when this hit came from ``data/manual_watchlist.json`` rather
+    than the IBKR scanner snapshot. Manual hits bypass float / rvol /
+    catalyst gates upstream; downstream code uses this flag to log
+    operator-injected entries distinctly from organic scanner hits."""
 
 
 class IBKRScanner:
@@ -219,11 +231,15 @@ class IBKRScanner:
         contracts = await self._fetch_ibkr_gappers()
         if not contracts:
             _log.info("scanner.empty_scan")
-            return []
+            # Manual watchlist entries (operator escape hatch) still need
+            # to seed the watchlist even when IBKR's TOP_PERC_GAIN returned
+            # nothing -- the whole point of manual entries is they bypass
+            # the IBKR scan.
+            return self._merge_manual_watchlist([])
         floats = await self._fetch_floats([c.symbol for c in contracts])
         survivors = self._apply_float_filter(contracts, floats)
         if not survivors:
-            return []
+            return self._merge_manual_watchlist([])
         # Phase 12.1 — quote enrichment runs BEFORE catalyst classification
         # so the rvol pillar can prune candidates the LLM would otherwise
         # be billed to evaluate. Best-effort: failures populate (None, None,
@@ -231,7 +247,7 @@ class IBKRScanner:
         quotes = await self._fetch_quotes_map(survivors)
         survivors, rvol_map = self._apply_rvol_filter(survivors, quotes, floats)
         if not survivors:
-            return []
+            return self._merge_manual_watchlist([])
         # Phase 6.8 override map — empty dict when the flag is off, so
         # every symbol follows the Finnhub path and the store is never
         # touched. Expired entries are filtered inside the helper.
@@ -298,7 +314,16 @@ class IBKRScanner:
                 pair[0],
             )
         )
-        return [hit for _, hit in indexed]
+        ranked = [hit for _, hit in indexed]
+        # Manual watchlist entries (operator escape hatch) are prepended so
+        # they always lead the ranked watchlist regardless of whether IBKR's
+        # TOP_PERC_GAIN scan returned them. They bypass every scanner gate
+        # (price / gap / premarket-vol / float / rvol / catalyst); the risk
+        # engine is the only safety net once a strategy fires a signal.
+        # Symbols already returned by the IBKR scan keep their organic
+        # ScanHit (with real float / rvol / catalyst) -- the manual entry
+        # is a no-op upgrade for those.
+        return self._merge_manual_watchlist(ranked)
 
     async def _fetch_ibkr_gappers(self) -> list[Contract]:
         """Issue one TOP_PERC_GAIN scan snapshot and return the returned contracts."""
@@ -651,6 +676,64 @@ class IBKRScanner:
             reasons=reasons,
             rvol=rvol,
             avg_daily_volume=avg_daily_volume,
+        )
+
+    def _merge_manual_watchlist(self, ranked: list[ScanHit]) -> list[ScanHit]:
+        """Prepend operator-injected manual watchlist entries to the ranked list.
+
+        Gated on ``settings.testing.allow_catalyst_overrides`` -- defence
+        in depth so a stale ``data/manual_watchlist.json`` on the operator's
+        machine can't influence a live run if the flag is off (mirrors the
+        catalyst_overrides pattern). Symbols already in ``ranked`` are
+        skipped: the organic scanner hit (with real float / rvol /
+        catalyst) takes precedence; the manual entry is a no-op upgrade.
+
+        Logs ``scanner.manual_watchlist_merged`` once per scan with the
+        list of operator-added symbols so the JSONL audit trail captures
+        every operator decision.
+        """
+        if not self._settings.testing.allow_catalyst_overrides:
+            return ranked
+        active = load_active_manual_watchlist(now=datetime.now(UTC))
+        if not active:
+            return ranked
+        existing_symbols = {hit.symbol for hit in ranked}
+        manual_hits: list[ScanHit] = []
+        for entry in active:
+            if entry.symbol in existing_symbols:
+                continue
+            manual_hits.append(self._manual_entry_to_hit(entry))
+        if not manual_hits:
+            return ranked
+        _log.info(
+            "scanner.manual_watchlist_merged",
+            symbols=[h.symbol for h in manual_hits],
+            count=len(manual_hits),
+        )
+        return manual_hits + ranked
+
+    def _manual_entry_to_hit(self, entry: ManualWatchlistEntry) -> ScanHit:
+        """Build a synthetic ScanHit for a manual watchlist entry.
+
+        No float / rvol / volume enrichment runs here -- the operator
+        explicitly bypassed those pillars. ``catalyst`` is the
+        ``MANUAL_CATALYST_SENTINEL`` so the no-catalyst drop filter
+        downstream lets the symbol survive (the filter checks for
+        ``catalyst is None``, not for any specific category).
+        """
+        return ScanHit(
+            symbol=entry.symbol,
+            price=None,
+            change_pct=None,
+            volume=None,
+            float_shares=None,
+            catalyst=MANUAL_CATALYST_SENTINEL,
+            float_source=None,
+            news_items=[],
+            reasons=["manual_watchlist"],
+            rvol=None,
+            avg_daily_volume=None,
+            manual=True,
         )
 
     def _load_active_overrides(self) -> dict[str, CatalystOverride]:
