@@ -1159,6 +1159,180 @@ def _load_from_path(path: Path) -> Any:
     return _loader
 
 
+# ---------- Phase 12.3: manual watchlist (operator escape hatch) ---------- #
+
+
+@pytest.mark.asyncio
+async def test_manual_entry_added_when_not_in_ibkr_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator-injected symbol absent from IBKR's TOP_PERC_GAIN must still appear in the watchlist."""
+    from datetime import UTC, datetime, timedelta
+
+    from bot.scanning.manual_watchlist import (
+        MANUAL_CATALYST_SENTINEL,
+        ManualWatchlistEntry,
+    )
+
+    now = datetime.now(UTC)
+    fake_active_entries = [
+        ManualWatchlistEntry(
+            symbol="ATRA",
+            expires_at=now + timedelta(hours=6),
+            note="FDA tab-cel",
+            added_at=now,
+            added_by="cli",
+        )
+    ]
+    monkeypatch.setattr(
+        "bot.scanning.scanner.load_active_manual_watchlist",
+        lambda *, now: fake_active_entries,
+    )
+    ibkr = _mock_ibkr([])  # IBKR scanner returns no candidates
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={}),
+        settings=_settings_with_override_flag(allow=True),
+        float_source=_float_source({}),
+    )
+    with structlog.testing.capture_logs() as logs:
+        hits = await scanner.scan_top_gappers()
+    assert [h.symbol for h in hits] == ["ATRA"]
+    assert hits[0].manual is True
+    assert hits[0].catalyst == MANUAL_CATALYST_SENTINEL
+    assert hits[0].reasons == ["manual_watchlist"]
+    assert any(row.get("event") == "scanner.manual_watchlist_merged" for row in logs)
+
+
+@pytest.mark.asyncio
+async def test_manual_entry_prepended_above_organic_scanner_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual entries lead the watchlist regardless of organic hits' change_pct rank."""
+    from datetime import timedelta
+
+    from bot.scanning.manual_watchlist import ManualWatchlistEntry
+
+    monkeypatch.setattr(
+        "bot.scanning.scanner.load_active_manual_watchlist",
+        lambda *, now: [
+            ManualWatchlistEntry(
+                symbol="ATRA",
+                expires_at=now + timedelta(hours=6),
+                note=None,
+                added_at=now,
+                added_by="cli",
+            )
+        ],
+    )
+    ibkr = _mock_ibkr(["GAINER"])
+    ibkr.ib.reqHistoricalDataAsync = AsyncMock(
+        return_value=[
+            _fake_daily_bar(close=2.0, volume=80_000),
+            _fake_daily_bar(close=4.0, volume=600_000),
+        ]
+    )
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={"GAINER": [_news("GAINER tops estimates")]}),
+        settings=_settings_with_override_flag(allow=True),
+        float_source=_float_source({"GAINER": 5_000_000}),
+    )
+    hits = await scanner.scan_top_gappers()
+    assert [h.symbol for h in hits] == ["ATRA", "GAINER"]
+    assert hits[0].manual is True
+    assert hits[1].manual is False
+
+
+@pytest.mark.asyncio
+async def test_manual_entry_does_not_duplicate_organic_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the IBKR scanner already returned the symbol, the organic ScanHit wins."""
+    from datetime import timedelta
+
+    from bot.scanning.manual_watchlist import ManualWatchlistEntry
+
+    monkeypatch.setattr(
+        "bot.scanning.scanner.load_active_manual_watchlist",
+        lambda *, now: [
+            ManualWatchlistEntry(
+                symbol="ATRA",
+                expires_at=now + timedelta(hours=6),
+                note=None,
+                added_at=now,
+                added_by="cli",
+            )
+        ],
+    )
+    ibkr = _mock_ibkr(["ATRA"])
+    ibkr.ib.reqHistoricalDataAsync = AsyncMock(
+        return_value=[
+            _fake_daily_bar(close=10.0, volume=100_000),
+            _fake_daily_bar(close=12.0, volume=500_000),
+        ]
+    )
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        # Use a headline the keyword classifier recognizes (matches
+        # "tops estimates" → earnings_beat green bucket) so the organic
+        # hit survives the no-catalyst filter and we exercise the
+        # manual-vs-organic precedence path rather than getting stuck
+        # on the keyword classifier's lexicon.
+        finnhub=_mock_finnhub(news={"ATRA": [_news("ATRA tops estimates")]}),
+        settings=_settings_with_override_flag(allow=True),
+        float_source=_float_source({"ATRA": 5_000_000}),
+    )
+    hits = await scanner.scan_top_gappers()
+    assert [h.symbol for h in hits] == ["ATRA"]  # exactly one entry, no duplicate
+    # Organic hit wins -- carries real volume + change_pct, not the manual stub.
+    assert hits[0].manual is False
+    assert hits[0].volume == 500_000
+
+
+@pytest.mark.asyncio
+async def test_manual_watchlist_ignored_when_gate_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``allow_catalyst_overrides=False`` MUST silently ignore the manual file.
+
+    Defence in depth: a stale data/manual_watchlist.json on disk can't
+    influence a live run if the operator's config has the flag off.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from bot.scanning.manual_watchlist import ManualWatchlistEntry
+
+    now = datetime.now(UTC)
+    sentinel = ManualWatchlistEntry(
+        symbol="SHOULD_NOT_APPEAR",
+        expires_at=now + timedelta(hours=6),
+        note=None,
+        added_at=now,
+        added_by="cli",
+    )
+    # Patch the loader to return entries; the scanner should never call it
+    # because the gate is off. Use a marker that would fail loud if loaded.
+    fake_loader_calls: list[Any] = []
+
+    def _loader(**kwargs: Any) -> list[ManualWatchlistEntry]:
+        fake_loader_calls.append(kwargs)
+        return [sentinel]
+
+    monkeypatch.setattr("bot.scanning.scanner.load_active_manual_watchlist", _loader)
+
+    ibkr = _mock_ibkr([])
+    scanner = IBKRScanner(
+        ibkr=ibkr,
+        finnhub=_mock_finnhub(news={}),
+        settings=_settings(),  # gate defaults to False
+        float_source=_float_source({}),
+    )
+    hits = await scanner.scan_top_gappers()
+    assert hits == []
+    assert fake_loader_calls == [], "manual watchlist loader called despite gate being off"
+
+
 # ---------- Phase 12.2: yfinance news fallback when Finnhub returns empty ---------- #
 
 
