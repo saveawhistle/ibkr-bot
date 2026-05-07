@@ -52,6 +52,11 @@ def _phase12_settings(
     classifier-focused tests don't have to wire avg_daily_volume into every
     fixture. Tests that want to exercise the rvol pillar live in
     ``test_scanner.py`` and opt in explicitly.
+
+    Phase 12.4: pin both strategies to ``catalyst_required=True`` so
+    these classifier-mode tests preserve the strict "no catalyst → drop"
+    invariant they were written against. Per-strategy differentiation
+    tests live in ``test_strategy_differentiation.py``.
     """
     base = Settings(universe=UniverseConfig(float_max=float_max, rvol_min=rvol_min))
     return base.model_copy(
@@ -59,6 +64,16 @@ def _phase12_settings(
             "catalyst_classifier": CatalystClassifierConfig(
                 llm=CatalystClassifierLLMConfig(enabled=llm_enabled),
                 keyword=CatalystClassifierKeywordConfig(enabled=keyword_enabled),
+            ),
+            "strategies": base.strategies.model_copy(
+                update={
+                    "gap_and_go": base.strategies.gap_and_go.model_copy(
+                        update={"catalyst_required": True}
+                    ),
+                    "momentum": base.strategies.momentum.model_copy(
+                        update={"catalyst_required": True}
+                    ),
+                }
             ),
         }
     )

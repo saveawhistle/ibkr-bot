@@ -23,6 +23,7 @@ from bot.strategies.base import (
     _apply_premarket_high_cap,
     _apply_stop_distance_floor,
 )
+from bot.strategies.volume import check_recent_window_rvol
 
 _WINDOW_START = time(9, 30)
 _MIN_BARS = 3
@@ -61,6 +62,9 @@ class GapAndGoStrategy(Strategy):
         premarket_high_cap_enabled: bool = True,
         stop_floor_min_abs: float = 0.05,
         stop_floor_min_pct: float = 0.02,
+        catalyst_required: bool = True,
+        recent_rvol_min: float = 2.0,
+        recent_rvol_window_bars: int = 20,
     ) -> None:
         """Store scale-out multiple, grace window, extension config, window end.
 
@@ -98,6 +102,13 @@ class GapAndGoStrategy(Strategy):
         self.premarket_high_cap_enabled = premarket_high_cap_enabled
         self.stop_floor_min_abs = stop_floor_min_abs
         self.stop_floor_min_pct = stop_floor_min_pct
+        # Phase 12.4: per-strategy admission flag, consumed by the orchestrator's
+        # dispatcher. ``catalyst_required=True`` (gap-and-go default) means
+        # this strategy only sees ``ScanHit``s with ``catalyst_confirmed=True``.
+        self.catalyst_required = catalyst_required
+        # Phase 12.4: moment-of-entry breakout-bar volume validation.
+        self.recent_rvol_min = recent_rvol_min
+        self.recent_rvol_window_bars = recent_rvol_window_bars
 
     def evaluate(self, symbol: str, bars: pd.DataFrame) -> Signal | None:
         """Emit a Signal if the latest bar triggers a gap-and-go entry, else None."""
@@ -285,6 +296,21 @@ class GapAndGoStrategy(Strategy):
                 capped_scale_out=round(scale_out, 4),
                 premarket_high=round(capped_target + _PMH_CAP_TICK, 4),
             )
+        # Phase 12.4: moment-of-entry breakout-bar volume validation.
+        # Pattern fires (all prior gates passed); now check that the
+        # candidate bar's volume is healthy vs the prior-N-bar average.
+        # Suppressed signals NEVER emit -- the suppression event below
+        # is the only audit trail. Pattern-stage logs already landed.
+        suppression = check_recent_window_rvol(
+            bars=bars,
+            window_bars=self.recent_rvol_window_bars,
+            threshold=self.recent_rvol_min,
+            symbol=symbol,
+            strategy=self.name,
+            bar_time=last_ts,
+        )
+        if suppression is not None:
+            return None
         # Phase 7.1: observability for the stop calculation. Emitted so a
         # downstream `stop_too_wide` rejection can be correlated with the
         # strategy's reference values (volatility vs. wick vs. bad pick).

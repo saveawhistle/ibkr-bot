@@ -19,8 +19,15 @@ if TYPE_CHECKING:
     from bot.execution.position_state import PositionStore
 
 
-def _hit(symbol: str) -> ScanHit:
-    """Build a minimal ScanHit — only ``symbol`` matters for the orchestrator."""
+def _hit(symbol: str, *, catalyst_confirmed: bool = True) -> ScanHit:
+    """Build a minimal ScanHit — only ``symbol`` matters for the orchestrator.
+
+    Phase 12.4: defaults to ``catalyst_confirmed=True`` so legacy tests
+    that exercise orchestration mechanics (cursor, staleness, rescan diff,
+    bar evaluation) preserve their original "every strategy evaluates
+    every symbol" behaviour. Phase 12.4 admission tests opt in to
+    ``catalyst_confirmed=False`` to exercise the new gating.
+    """
     return ScanHit(
         symbol=symbol,
         price=None,
@@ -28,6 +35,7 @@ def _hit(symbol: str) -> ScanHit:
         volume=None,
         float_shares=4_000_000,
         catalyst="earnings_beat",
+        catalyst_confirmed=catalyst_confirmed,
     )
 
 

@@ -79,6 +79,16 @@ class ScanHit:
     than the IBKR scanner snapshot. Manual hits bypass float / rvol /
     catalyst gates upstream; downstream code uses this flag to log
     operator-injected entries distinctly from organic scanner hits."""
+    catalyst_confirmed: bool = False
+    """Phase 12.4 strategy-differentiation flag. True only when the LLM
+    classifier returned ``qualifies=True`` for this ticker (or a manual
+    catalyst override is active). Determines per-strategy admission:
+    strategies with ``catalyst_required=True`` (gap-and-go) only see
+    catalyst-confirmed hits; strategies with ``catalyst_required=False``
+    (momentum) see every hit on the watchlist regardless. Borderline
+    classifier outcomes (``qualifies=False`` with any confidence,
+    ``no_news``, ``llm_call_failed``, transient errors) all leave this
+    False -- the strict reading per the locked architectural spec."""
 
 
 class IBKRScanner:
@@ -287,24 +297,37 @@ class IBKRScanner:
             )
             for c in survivors
         ]
-        # Phase 6.11: drop symbols whose catalyst never landed. The
-        # 5-pillar rule treats news as mandatory — subscribing bars for
-        # a no-catalyst symbol just burns an IBKR slot (cap=10) that the
-        # next rescan's catalyst-bearing candidate could use. The 5-min
-        # rescan interval recovers any symbol where news lands after
-        # first scan. Operator manual overrides (Phase 6.8) attach a
-        # synthetic catalyst BEFORE this filter so injected symbols
-        # always survive.
+        # Phase 12.4: per-strategy admission replaces the unconditional
+        # no-catalyst drop. Tickers without a confirmed catalyst are kept
+        # on the watchlist when ANY enabled strategy has
+        # ``catalyst_required=False`` (e.g. momentum) -- those strategies
+        # can still trade the technical pattern. Tickers with no catalyst
+        # AND no admitting strategy still get dropped (the IBKR slot
+        # would be wasted). The per-strategy dispatcher in the
+        # orchestrator filters per-symbol per-strategy at evaluation
+        # time using ``ScanHit.catalyst_confirmed`` -- the scanner's
+        # only job here is to decide "does this hit deserve a watchlist
+        # slot at all?"
+        any_strategy_admits_unconfirmed = self._any_strategy_admits_unconfirmed()
         hits: list[ScanHit] = []
         for hit in raw_hits:
-            if hit.catalyst is None:
+            eligible_strategies = self._eligible_strategies_for(hit)
+            if not eligible_strategies:
                 _log.info(
                     "scanner.dropped_no_catalyst",
                     symbol=hit.symbol,
                     float_shares=hit.float_shares,
                     float_source=hit.float_source,
+                    catalyst_confirmed=hit.catalyst_confirmed,
+                    any_strategy_admits_unconfirmed=any_strategy_admits_unconfirmed,
                 )
                 continue
+            _log.info(
+                "scanner.watchlist_admitted",
+                symbol=hit.symbol,
+                catalyst_confirmed=hit.catalyst_confirmed,
+                eligible_strategies=eligible_strategies,
+            )
             hits.append(hit)
         # Preserve IBKR scanner rank when we can't compute change_pct numerically.
         indexed = list(enumerate(hits))
@@ -621,8 +644,13 @@ class IBKRScanner:
         """
         float_shares = float_data.float_shares if float_data is not None else None
         float_source = float_data.source if float_data is not None else None
+        catalyst_confirmed = False
         if override is not None:
             catalyst: str | None = override.category
+            # Manual operator override is treated as a confirmed catalyst:
+            # the operator's deliberate injection is at least as strong
+            # a signal as a classifier qualification.
+            catalyst_confirmed = True
             _log.info(
                 "catalyst.manual_override_applied",
                 symbol=contract.symbol,
@@ -635,8 +663,18 @@ class IBKRScanner:
         elif mode == "llm" and llm_result is not None:
             if llm_result.qualifies and llm_result.classification is not None:
                 catalyst = llm_result.classification.category
+                catalyst_confirmed = True
             else:
-                catalyst = None
+                # Phase 12.4: keep the classifier's category in ``catalyst``
+                # for forensics when it produced one, so downstream review
+                # can see what the LLM thought even on disqualified hits.
+                # ``catalyst_confirmed=False`` is what gates strict-Ross
+                # admission downstream.
+                catalyst = (
+                    llm_result.classification.category
+                    if llm_result.classification is not None
+                    else None
+                )
         elif mode == "keyword":
             catalyst = (
                 classify(
@@ -652,16 +690,21 @@ class IBKRScanner:
                 if news_items
                 else None
             )
+            # Pre-12.4 keyword path: any green-bucket match counts as
+            # confirmed (the keyword classifier has no qualifies=False
+            # equivalent -- a non-None category is the qualification).
+            catalyst_confirmed = catalyst is not None
         else:
             # mode == "none" or mode == "llm" without llm_result (defensive).
-            # No catalyst evaluation runs; the hit drops at the
-            # no-catalyst filter downstream.
+            # No catalyst evaluation runs; admission flag stays False.
             catalyst = None
         reasons: list[str] = []
         if float_shares is None:
             reasons.append("float_unknown")
         if catalyst is None:
             reasons.append("no_catalyst")
+        if not catalyst_confirmed:
+            reasons.append("catalyst_unconfirmed")
         price, change_pct, volume = quote if quote is not None else (None, None, None)
         avg_daily_volume = float_data.avg_daily_volume if float_data is not None else None
         return ScanHit(
@@ -676,7 +719,44 @@ class IBKRScanner:
             reasons=reasons,
             rvol=rvol,
             avg_daily_volume=avg_daily_volume,
+            catalyst_confirmed=catalyst_confirmed,
         )
+
+    def _any_strategy_admits_unconfirmed(self) -> bool:
+        """Phase 12.4 — True if any *enabled* strategy has ``catalyst_required=False``.
+
+        Used to decide whether to keep a no-catalyst hit on the watchlist
+        at all. If every enabled strategy requires a confirmed catalyst,
+        a no-catalyst hit can never produce a signal -- subscribing bars
+        for it just burns an IBKR slot. If at least one enabled strategy
+        admits unconfirmed (e.g. momentum), the hit is kept and the
+        per-strategy dispatcher decides per-symbol per-strategy at
+        evaluation time.
+        """
+        s = self._settings.strategies
+        if s.gap_and_go.enabled and not s.gap_and_go.catalyst_required:
+            return True
+        return bool(s.momentum.enabled and not s.momentum.catalyst_required)
+
+    def _eligible_strategies_for(self, hit: ScanHit) -> list[str]:
+        """Phase 12.4 — return the names of enabled strategies that admit this hit.
+
+        Manual watchlist hits (operator escape hatch) are admitted to
+        every enabled strategy regardless of catalyst status -- the
+        operator's deliberate add overrides the per-strategy gate, same
+        as it overrides scanner pillars.
+        """
+        s = self._settings.strategies
+        eligible: list[str] = []
+        if s.gap_and_go.enabled and (
+            hit.catalyst_confirmed or not s.gap_and_go.catalyst_required or hit.manual
+        ):
+            eligible.append("gap_and_go")
+        if s.momentum.enabled and (
+            hit.catalyst_confirmed or not s.momentum.catalyst_required or hit.manual
+        ):
+            eligible.append("momentum")
+        return eligible
 
     def _merge_manual_watchlist(self, ranked: list[ScanHit]) -> list[ScanHit]:
         """Prepend operator-injected manual watchlist entries to the ranked list.
@@ -734,6 +814,9 @@ class IBKRScanner:
             rvol=None,
             avg_daily_volume=None,
             manual=True,
+            # Phase 12.4: operator's deliberate add overrides the
+            # per-strategy gate, same as it overrides scanner pillars.
+            catalyst_confirmed=True,
         )
 
     def _load_active_overrides(self) -> dict[str, CatalystOverride]:

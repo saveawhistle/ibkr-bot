@@ -1,14 +1,17 @@
 # ibkr-bot
 
-An automated day-trading bot for Interactive Brokers that encodes the **Gap and Go** and **Momentum (Bull Flag / HOD Breakout)** strategies. It scans the premarket universe through the 5-Pillar filters, enters via atomic bracket orders during the 9:30–11:30 ET window where the strategy's edge is strongest, and enforces non-negotiable daily risk rules ($-based per-trade and daily loss caps, profit-goal halt, give-back guard, automatic rehab tier on cold streaks, flat by 15:55 ET). See [PLAN.md](PLAN.md) for the strategy spec and the original architecture.
+An automated day-trading bot for Interactive Brokers that encodes the **Gap and Go** and **Momentum (Bull Flag / HOD Breakout)** strategies. It scans the premarket universe through the 6-Pillar filters (price / gap / premarket-vol / float / rvol / catalyst), enters via atomic bracket orders during the 9:30–11:30 ET window where the strategy's edge is strongest, and enforces non-negotiable daily risk rules ($-based per-trade and daily loss caps, profit-goal halt, give-back guard, automatic rehab tier on cold streaks, flat by 15:55 ET). See [PLAN.md](PLAN.md) for the strategy spec and the original architecture.
 
 ## Project status
 
-**Paper trading.** The core production loop (Phase 4b risk + Phase 4i exit discipline) is fully exercised; layered enhancements through Phase 10.6 are landed and active; Phase 10.1 watchdog and Phase 11 exit advisor ship in **shadow / disabled** mode pending operator-controlled activation. No real money has run through this code.
+**Paper trading.** The core production loop (Phase 4b risk + Phase 4i exit discipline) is fully exercised; layered enhancements through Phase 12.4 are landed and active; Phase 10.1 watchdog and Phase 11 exit advisor ship in **shadow / disabled** mode pending operator-controlled activation. No real money has run through this code.
 
 What's in the main loop today:
-- 5-Pillar premarket scanner with Finnhub catalyst classification and float lookup
-- `GapAndGoStrategy` and `MomentumStrategy` operating on 1-min bars
+- 6-Pillar premarket scanner: price / gap / premarket-vol (IBKR `TOP_PERC_GAIN` tags) → float (yfinance + Finnhub fallback) → daily RVOL (today's session vol vs 10-day avg) → catalyst (LLM classifier)
+- **Phase 12 LLM catalyst classifier** — Claude Sonnet 4.6 with tool-use, per-ticker classification on news from Finnhub primary + yfinance Search fallback, transient-error tolerance (HTTP 529 doesn't trip self-disable), per-session cost caps
+- **Phase 12.4 strategy-differentiated admission** — gap-and-go requires confirmed catalyst (`qualifies=True`); momentum admits unconfirmed tickers as technical-only and trades the bull-flag pattern in its own right
+- `GapAndGoStrategy` and `MomentumStrategy` operating on 1-min bars, with **moment-of-entry recent-window RVOL validation** (breakout bar volume must be ≥ 2× the rolling 20-bar average to fire)
+- Phase 12.3 manual watchlist (`watch-symbol` CLI escape hatch) — operator can add tickers that bypass every scanner pillar; risk gates still apply
 - $-based risk engine (per-trade cap, daily loss halt, profit goal, give-back, max trades/day)
 - Phase 4d multi-pullback re-entries (cooldown + profitable-prior-exit gate)
 - Phase 4g automatic **rehab tier** scaling caps to 50% / 25% on consecutive red days or cumulative drawdown, with hysteresis recovery
@@ -75,15 +78,24 @@ bot/
 │   └── bar_aggregator.py # 5-sec → 1-min in-process aggregation
 │
 ├── scanning/           # premarket universe → ranked watchlist
-│   ├── scanner.py      # IBKR TOP_PERC_GAIN + 5-Pillar post-filter
-│   ├── catalyst.py     # Finnhub news → category classifier (green/black list)
+│   ├── scanner.py      # IBKR TOP_PERC_GAIN + 6-Pillar post-filter, per-strategy admission
+│   ├── catalyst.py     # legacy keyword classifier (rollback fallback to Phase 12 LLM)
 │   ├── catalyst_overrides.py  # operator-injected catalysts (paper testing)
+│   ├── manual_watchlist.py    # Phase 12.3 — operator-injected watchlist symbols (escape hatch)
 │   ├── finnhub_client.py
-│   └── float_source.py # Finnhub primary, yfinance fallback
+│   ├── yfinance_news.py       # Phase 12.2 — news fallback when Finnhub returns empty (Search API)
+│   ├── float_source.py # yfinance primary (float + 10-day avg vol), Finnhub fallback
+│   └── llm_catalyst_classifier/  # Phase 12 — Sonnet 4.6 catalyst classification
+│       ├── classifier.py        # async per-ticker eval, session-qualified cache, self-disable
+│       ├── llm_client.py        # Anthropic SDK wrapper (max_retries=0, transient-error flag)
+│       ├── cache.py             # 30-min TTL cache keyed on (ticker, headline-hash)
+│       ├── bootstrap.py         # API key + cost cap construction
+│       └── prompts.py           # system prompt + classify_catalyst tool schema
 │
 ├── strategies/         # signal generators (no order placement)
-│   ├── gap_and_go.py
-│   └── momentum.py
+│   ├── gap_and_go.py   # Phase 12.4: catalyst_required=True (strict)
+│   ├── momentum.py     # Phase 12.4: catalyst_required=False (technical-only OK)
+│   └── volume.py       # Phase 12.4: RecentVolumeWindow + recent-RVOL signal-suppression helper
 │
 ├── risk/
 │   ├── engine.py       # sizing, halts, re-entry gate, margin awareness, halt-flag persistence
@@ -125,11 +137,13 @@ bot/
 | `suggest-caps` | Analyze the journal and print advisory risk-cap suggestions (never writes config) |
 | `commissions` | Per-leg commission rollup over a journal window |
 | `inject-catalyst` | Phase 6.8 paper-testing hook — manually inject a catalyst category for a symbol |
+| `watch-symbol` | Phase 12.3 paper-testing hook — add a ticker to the watchlist regardless of the IBKR scanner |
+| `unwatch-symbol` | Remove a manual watchlist entry. Idempotent. |
 | `force-entry` | Phase 6.13 paper-testing hook — fabricate a signal and push it through the executor |
 
-Run any command with `--help` for its flags. Most commands need TWS/Gateway running; the journal-only commands (`commissions`, `suggest-caps`, `rehab-status`) and the catalyst-override CLI are read/write against local state only.
+Run any command with `--help` for its flags. Most commands need TWS/Gateway running; the journal-only commands (`commissions`, `suggest-caps`, `rehab-status`) and the catalyst-override / manual-watchlist CLIs are read/write against local state only.
 
-The `inject-catalyst` and `force-entry` commands are double-gated: `testing.allow_catalyst_overrides` / `testing.allow_force_entry` in [config.yaml](config.yaml) **and** `account.mode == paper`. Live configs must keep both flags off.
+The `inject-catalyst`, `watch-symbol` / `unwatch-symbol`, and `force-entry` commands are double-gated: `testing.allow_catalyst_overrides` / `testing.allow_force_entry` in [config.yaml](config.yaml) **and** `account.mode == paper`. Live configs must keep both flags off. (The manual-watchlist CLIs reuse the catalyst-overrides gate — same risk profile: bypassing a scanner gate that must stay closed in live trading.)
 
 ## Risk model
 
@@ -162,6 +176,35 @@ The rehab engine ([bot/risk/rehab.py](bot/risk/rehab.py)) automatically downsize
 | DEEP_REHAB | 4 consecutive reds **or** drawdown ≥ 5× daily-loss | 25% | 25% | 1 |
 
 Recovery is hysteretic: the bot must earn back 50% of the drawdown before tiers step back down. Tier state is persisted in `logs/rehab.flag` and survives restarts. Inspect with `uv run python -m bot rehab-status`.
+
+## Per-strategy admission and signal validation (Phase 12.4)
+
+Daily-scale qualification (the 6-Pillar gate the scanner runs once per pass) decides which tickers belong on the watchlist. Moment-of-entry validation is a separate decision: even a fully-qualified ticker can fade on dead air, with the breakout bar firing on stale low volume. Phase 12.4 splits these.
+
+**Per-strategy catalyst admission.** The LLM classifier still runs unconditionally on every ticker that clears the cheaper pillars; what changes is how its result is used:
+
+| Strategy | `catalyst_required` | What this means |
+| --- | --- | --- |
+| `gap_and_go` | `true` (default) | Strict Ross framework — only sees tickers with `qualifies=True` from the classifier (or a manual catalyst override / manual-watchlist entry). |
+| `momentum` | `false` (default) | Bull-flag pattern is the entry signal in its own right; admits tickers regardless of catalyst classifier outcome. |
+
+A ticker without a confirmed catalyst stays on the watchlist as long as **at least one** enabled strategy admits unconfirmed; otherwise it's dropped (no point burning an IBKR slot on a name no strategy will trade). The dispatcher filters per-symbol per-strategy at evaluation time. Forensics: each surviving hit emits a `scanner.watchlist_admitted` event with its `eligible_strategies` list.
+
+Borderline classifier outcomes (`qualifies=False` at any confidence, `no_news`, transient errors) all leave `catalyst_confirmed=False` — strict on confirmation by design. Manual catalyst overrides and manual-watchlist hits both set the flag to True (operator deliberate add ≥ classifier qualification).
+
+**Recent-window RVOL signal validation.** Both strategies validate the breakout bar's volume against the rolling N-bar prior-window average **at signal generation** — after pattern detection, before the Signal is constructed. Suppressed signals never reach the bus or the risk engine.
+
+Defaults (per-strategy, configurable in [config.yaml](config.yaml)):
+- `recent_rvol_min: 2.0` — breakout-bar volume must be ≥ 2× the rolling average
+- `recent_rvol_window_bars: 20` — average of the prior 20 1-min bars (sanity floor: 5)
+
+Suppression behaviour on a partial window (fewer than `window_bars + 1` rows available, e.g. early in the session) is conservative: **suppress until the window is fully populated** rather than fall back to partial-window proportional thresholds. With the 20-bar default, signals can't fire before ~9:50 ET on a new session. Operator can shorten the window per strategy if early-session fires are required.
+
+Both suppression cases emit structured events with full forensic context:
+- `strategy.signal_suppressed_recent_rvol` — `candidate_volume`, `window_average`, `rvol`, `threshold`
+- `strategy.signal_suppressed_window_not_populated` — `bars_available`, `window_required`
+
+The risk engine remains the only path to a fill regardless. Phase 12.4 is observability + admission policy; risk caps, sizing, and the bracket-execution path are unchanged.
 
 ## Order execution
 
@@ -224,7 +267,7 @@ Two activation switches: `exit_advisor.enabled` (master) and `exit_advisor.hook_
 uv run python -m bot backtest AMC 2021-06-02 --catalyst
 ```
 
-**Catalyst caveat.** The live bot's catalyst gate lives in the Phase 2 scanner (Finnhub news, the green/black list), and historical news replay is out of scope here. By default `backtest` runs Momentum only and suppresses Gap-and-Go, since replaying it without a catalyst would be misleading. Pass `--catalyst` to force a synthetic `manual_override` catalyst and run both strategies — use this only when you *know* the target day had a legitimate catalyst. IBKR 1-min historical bars are only available for ~6 months; older dates will be rejected. Signals and rejections are written to `logs/backtest_<symbol>_<date>.jsonl` and `logs/backtest_rejections_<symbol>_<date>.jsonl` for later inspection.
+**Catalyst caveat.** The live bot's catalyst gate is the Phase 12 LLM classifier (Sonnet 4.6 over Finnhub-primary + yfinance-fallback news), and historical news replay is out of scope here. By default `backtest` runs Momentum only and suppresses Gap-and-Go, since replaying gap-and-go without a confirmed catalyst would be misleading under the Phase 12.4 strict admission rule. Pass `--catalyst` to force a synthetic `manual_override` catalyst and run both strategies — use this only when you *know* the target day had a legitimate catalyst. IBKR 1-min historical bars are only available for ~6 months; older dates will be rejected. Signals and rejections are written to `logs/backtest_<symbol>_<date>.jsonl` and `logs/backtest_rejections_<symbol>_<date>.jsonl` for later inspection.
 
 For the offline exit-advisor harness (different code path), see [scripts/run_aggregate_report.py](scripts/run_aggregate_report.py) and [scripts/run_policy_comparison.py](scripts/run_policy_comparison.py).
 

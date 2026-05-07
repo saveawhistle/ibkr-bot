@@ -228,6 +228,12 @@ class Strategy(ABC):
 
     name: str = "strategy"
 
+    # Phase 12.4 — per-strategy admission flag, defaulted at the ABC so generic
+    # dispatcher code can read ``getattr(strategy, "catalyst_required", True)``
+    # without per-strategy hasattr juggling. Concrete strategies override
+    # via their constructor; the safe default is True (strict admission).
+    catalyst_required: bool = True
+
     def __init__(self, scale_out_multiple: float = 2.0) -> None:
         """Store the scale-out anchor multiple.
 

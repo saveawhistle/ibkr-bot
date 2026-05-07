@@ -22,6 +22,7 @@ from bot.strategies.base import (
     _apply_premarket_high_cap,
     _apply_stop_distance_floor,
 )
+from bot.strategies.volume import check_recent_window_rvol
 
 _WINDOW_START = time(9, 30)
 _FLAG_LOOKBACK = 10
@@ -55,6 +56,9 @@ class MomentumStrategy(Strategy):
         premarket_high_cap_enabled: bool = True,
         stop_floor_min_abs: float = 0.05,
         stop_floor_min_pct: float = 0.02,
+        catalyst_required: bool = False,
+        recent_rvol_min: float = 2.0,
+        recent_rvol_window_bars: int = 20,
     ) -> None:
         """Store pullback envelope, scale-out R-multiple, extension config, window end.
 
@@ -84,6 +88,14 @@ class MomentumStrategy(Strategy):
         self.premarket_high_cap_enabled = premarket_high_cap_enabled
         self.stop_floor_min_abs = stop_floor_min_abs
         self.stop_floor_min_pct = stop_floor_min_pct
+        # Phase 12.4: per-strategy admission flag. ``catalyst_required=False``
+        # (momentum default) means this strategy admits ScanHits regardless
+        # of catalyst-classifier outcome -- the bull-flag pattern is itself
+        # the entry signal.
+        self.catalyst_required = catalyst_required
+        # Phase 12.4: moment-of-entry breakout-bar volume validation.
+        self.recent_rvol_min = recent_rvol_min
+        self.recent_rvol_window_bars = recent_rvol_window_bars
 
     def evaluate(self, symbol: str, bars: pd.DataFrame) -> Signal | None:
         """Emit a Signal if the latest bar breaks HOD out of a bull flag."""
@@ -248,6 +260,21 @@ class MomentumStrategy(Strategy):
                 capped_scale_out=round(scale_out, 4),
                 premarket_high=round(capped_target + _PMH_CAP_TICK, 4),
             )
+
+        # Phase 12.4: moment-of-entry breakout-bar volume validation.
+        # Pattern + structural stop are valid; gate on volume health.
+        # Suppressed signals never reach the bus; the suppression event
+        # is the audit trail.
+        suppression = check_recent_window_rvol(
+            bars=bars,
+            window_bars=self.recent_rvol_window_bars,
+            threshold=self.recent_rvol_min,
+            symbol=symbol,
+            strategy=self.name,
+            bar_time=last_ts,
+        )
+        if suppression is not None:
+            return None
 
         # Phase 7.1: observability — see gap_and_go for rationale. Emitted so
         # an operator can correlate the strategy's stop reference with any

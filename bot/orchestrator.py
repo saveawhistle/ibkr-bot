@@ -238,6 +238,9 @@ def build_default_strategies(settings: Settings | None = None) -> list[Strategy]
                 premarket_high_cap_enabled=s.strategies.premarket_high_cap_enabled,
                 stop_floor_min_abs=floor_min_abs,
                 stop_floor_min_pct=floor_min_pct,
+                catalyst_required=gng_cfg.catalyst_required,
+                recent_rvol_min=gng_cfg.recent_rvol_min,
+                recent_rvol_window_bars=gng_cfg.recent_rvol_window_bars,
             )
         )
     if s.strategies.momentum.enabled:
@@ -252,6 +255,9 @@ def build_default_strategies(settings: Settings | None = None) -> list[Strategy]
                 premarket_high_cap_enabled=s.strategies.premarket_high_cap_enabled,
                 stop_floor_min_abs=floor_min_abs,
                 stop_floor_min_pct=floor_min_pct,
+                catalyst_required=mom_cfg.catalyst_required,
+                recent_rvol_min=mom_cfg.recent_rvol_min,
+                recent_rvol_window_bars=mom_cfg.recent_rvol_window_bars,
             )
         )
     return strategies
@@ -401,6 +407,18 @@ async def run_strategy_loop(
     last_evaluated_bar_ts: dict[tuple[str, str], pd.Timestamp] = {}
     bar_staleness_threshold = int(resolved_settings.session.bar_staleness_threshold_seconds)
 
+    # Phase 12.4 — per-symbol admission flags maintained by the dispatcher.
+    # ``catalyst_confirmed_by_symbol[sym]=True`` means the symbol cleared the
+    # LLM classifier (or has a manual catalyst override / manual watchlist
+    # entry); strategies with ``catalyst_required=True`` only evaluate
+    # confirmed symbols. Updated in lockstep with ``streams`` -- initial
+    # watchlist seeds it, rescan diff overwrites with the new hits' flags,
+    # and watchlist removals delete entries.
+    catalyst_confirmed_by_symbol: dict[str, bool] = {
+        h.symbol: h.catalyst_confirmed for h in watchlist
+    }
+    manual_by_symbol: dict[str, bool] = {h.symbol: h.manual for h in watchlist}
+
     async def _evaluate_symbol(
         symbol: str, bars: pd.DataFrame, latest_bar_ts: pd.Timestamp | None
     ) -> None:
@@ -417,7 +435,25 @@ async def run_strategy_loop(
         if executor is not None and latest_bar_ts is not None:
             executor.expire_unfilled_entry(symbol, latest_bar_ts.to_pydatetime())
         batch: list[Signal] = []
+        # Phase 12.4 — per-strategy admission. A strategy with
+        # ``catalyst_required=True`` evaluates the symbol only when
+        # ``catalyst_confirmed`` is True OR the symbol came from the
+        # manual watchlist (operator escape hatch). Symbols not in the
+        # admission map (transient race during rescan diff) default to
+        # confirmed=False / manual=False -- unconfirmed strategies still
+        # run, strict strategies skip; the next bar evaluation post-diff
+        # gets the correct flags.
+        confirmed = catalyst_confirmed_by_symbol.get(symbol, False)
+        is_manual = manual_by_symbol.get(symbol, False)
         for strategy in strategies:
+            strategy_requires_catalyst = getattr(strategy, "catalyst_required", True)
+            if strategy_requires_catalyst and not (confirmed or is_manual):
+                # Skip this strategy for this symbol; it doesn't admit
+                # unconfirmed-catalyst tickers. No log per-call (would spam
+                # the JSONL on every poll); the per-scan
+                # scanner.watchlist_admitted event already records the
+                # eligible-strategy mapping for forensic review.
+                continue
             if latest_bar_ts is not None:
                 cursor_key = (symbol, strategy.name)
                 last_seen = last_evaluated_bar_ts.get(cursor_key)
@@ -606,6 +642,25 @@ async def run_strategy_loop(
                             bar_source=bar_source,
                             on_symbol_dropped=on_drop,
                         )
+                        # Phase 12.4 — refresh per-symbol admission flags
+                        # from the new hits, dropping entries for symbols
+                        # that left the watchlist. New hits' flags
+                        # overwrite stale entries (a ticker that was
+                        # admitted as technical-only and is now
+                        # catalyst-confirmed should evaluate via gap-and-go
+                        # immediately on the next bar).
+                        new_hit_by_symbol = {h.symbol: h for h in new_hits}
+                        for h in new_hits:
+                            catalyst_confirmed_by_symbol[h.symbol] = h.catalyst_confirmed
+                            manual_by_symbol[h.symbol] = h.manual
+                        for symbol in removed:
+                            catalyst_confirmed_by_symbol.pop(symbol, None)
+                            manual_by_symbol.pop(symbol, None)
+                        # Symbols still in streams but absent from new_hits
+                        # (kept for active position) keep their prior flags
+                        # -- safest default until a future rescan re-emits
+                        # admission. Defensive log if we ever encounter one.
+                        del new_hit_by_symbol
                         for symbol in removed:
                             stall_counts.pop(symbol, None)
                         _log.info(
