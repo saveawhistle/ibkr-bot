@@ -28,7 +28,13 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterable
+
+import pandas as pd
+import structlog
+
+_log = structlog.get_logger("bot.strategies.volume")
 
 
 @dataclass
@@ -123,4 +129,102 @@ class RecentVolumeWindow:
         return float(candidate_volume) / avg
 
 
-__all__ = ["RecentVolumeWindow"]
+def check_recent_window_rvol(
+    *,
+    bars: pd.DataFrame,
+    window_bars: int,
+    threshold: float,
+    symbol: str,
+    strategy: str,
+    bar_time: datetime | pd.Timestamp,
+) -> str | None:
+    """Validate the latest bar's volume against the prior-N-bar average.
+
+    Returns ``None`` when the signal should proceed; returns a short
+    suppression-reason string (``"window_not_populated"`` /
+    ``"low_recent_rvol"``) when the strategy should NOT emit. Logs the
+    suppression event with full forensic context as a side effect.
+
+    Contract:
+
+    * The ``bars`` DataFrame's last row is the candidate breakout bar.
+    * The prior ``window_bars`` rows are the rolling baseline.
+    * If ``bars`` doesn't hold enough rows to populate the window
+      (i.e. fewer than ``window_bars + 1`` total rows), the helper
+      returns ``"window_not_populated"`` and logs
+      ``strategy.signal_suppressed_window_not_populated``. This is the
+      conservative spec: suppress until the window is fully populated
+      rather than fall back to partial-window proportional thresholds.
+    * If the candidate's volume / window-average is below
+      ``threshold``, returns ``"low_recent_rvol"`` and logs
+      ``strategy.signal_suppressed_recent_rvol``.
+
+    The helper does NOT mutate ``bars`` and does NOT add the candidate
+    bar to the rolling window -- the average is over the *prior* N bars
+    only, and the candidate is the comparison subject.
+    """
+    if threshold <= 0:
+        # Disabled-via-test path. Production config's validator enforces
+        # ``recent_rvol_min > 0``, so this branch is reachable only from
+        # tests that opt out by passing ``recent_rvol_min=0.0`` to the
+        # strategy constructor directly. Mirrors the
+        # ``universe.rvol_min <= 0`` test-disable in the scanner pillar.
+        return None
+    if "volume" not in bars.columns:
+        # Synthetic-frame test path. Bail quietly to None -- pre-12.4
+        # strategies emitted in this case without any volume gate.
+        return None
+    total_rows = len(bars)
+    if total_rows < window_bars + 1:
+        ts_iso = bar_time.isoformat() if hasattr(bar_time, "isoformat") else str(bar_time)
+        _log.info(
+            "strategy.signal_suppressed_window_not_populated",
+            symbol=symbol,
+            strategy=strategy,
+            bar_time=ts_iso,
+            bars_available=total_rows,
+            window_required=window_bars + 1,
+        )
+        return "window_not_populated"
+    window = RecentVolumeWindow(window_bars=window_bars)
+    # Prior-N bars: rows [-window_bars-1, -1) -- excludes the candidate.
+    prior_volumes = bars["volume"].iloc[-window_bars - 1 : -1]
+    window.extend_from_volumes(float(v) for v in prior_volumes)
+    candidate_volume = float(bars["volume"].iloc[-1])
+    rvol = window.relative_volume(candidate_volume)
+    avg = window.average_volume()
+    if rvol is None:
+        # Window populated but average is zero -- legitimate but
+        # pathological. Treat as "no baseline; suppress" rather than
+        # divide-by-zero. Use the not_populated event so the operator
+        # has one bucket to grep for "couldn't compute rvol".
+        ts_iso = bar_time.isoformat() if hasattr(bar_time, "isoformat") else str(bar_time)
+        _log.info(
+            "strategy.signal_suppressed_window_not_populated",
+            symbol=symbol,
+            strategy=strategy,
+            bar_time=ts_iso,
+            bars_available=total_rows,
+            window_required=window_bars + 1,
+            window_average=avg,
+            note="zero_average",
+        )
+        return "window_not_populated"
+    if rvol < threshold:
+        ts_iso = bar_time.isoformat() if hasattr(bar_time, "isoformat") else str(bar_time)
+        _log.info(
+            "strategy.signal_suppressed_recent_rvol",
+            symbol=symbol,
+            strategy=strategy,
+            bar_time=ts_iso,
+            candidate_volume=candidate_volume,
+            window_average=round(avg, 2) if avg is not None else None,
+            rvol=round(rvol, 3),
+            threshold=threshold,
+            window_bars=window_bars,
+        )
+        return "low_recent_rvol"
+    return None
+
+
+__all__ = ["RecentVolumeWindow", "check_recent_window_rvol"]

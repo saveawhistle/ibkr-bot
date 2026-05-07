@@ -22,6 +22,7 @@ from bot.strategies.base import (
     _apply_premarket_high_cap,
     _apply_stop_distance_floor,
 )
+from bot.strategies.volume import check_recent_window_rvol
 
 _WINDOW_START = time(9, 30)
 _FLAG_LOOKBACK = 10
@@ -259,6 +260,21 @@ class MomentumStrategy(Strategy):
                 capped_scale_out=round(scale_out, 4),
                 premarket_high=round(capped_target + _PMH_CAP_TICK, 4),
             )
+
+        # Phase 12.4: moment-of-entry breakout-bar volume validation.
+        # Pattern + structural stop are valid; gate on volume health.
+        # Suppressed signals never reach the bus; the suppression event
+        # is the audit trail.
+        suppression = check_recent_window_rvol(
+            bars=bars,
+            window_bars=self.recent_rvol_window_bars,
+            threshold=self.recent_rvol_min,
+            symbol=symbol,
+            strategy=self.name,
+            bar_time=last_ts,
+        )
+        if suppression is not None:
+            return None
 
         # Phase 7.1: observability — see gap_and_go for rationale. Emitted so
         # an operator can correlate the strategy's stop reference with any
