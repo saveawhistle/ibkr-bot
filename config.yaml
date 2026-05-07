@@ -70,6 +70,13 @@ execution:
   # entry buffers. Without this, the floor produces 13% LMT buffers on
   # $1 stocks — see SHPH 2026-05-01 13:53:50 UTC Error 202 incident.
   lmt_buffer_max_pct: 7.0
+  # Phase 12.5 — IBKR Error 202 (aggressive-LMT cancel) recovery. When the
+  # entry LMT is cancelled by IBKR because it sits above ~9.78% of current
+  # market, the executor parses the suggested ceiling from the error
+  # string and re-submits the bracket ONCE at that ceiling minus one tick.
+  # Mitigates fast-fading breakouts where market < entry by the time IBKR
+  # processes the order. Set false to restore pre-12.5 single-shot behaviour.
+  lmt_aggressive_limit_retry: true
   # Phase 7.8 — the "first red candle close" pre-scale exit.
   # Disabled 2026-04-24 after WLDS doji false-fire (close $0.003 below prior close
   # triggered the exit). Semantics need rethink — options under discussion:

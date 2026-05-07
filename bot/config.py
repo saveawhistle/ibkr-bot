@@ -360,6 +360,15 @@ class ExecutionConfig(BaseModel):
     # Symmetric to Phase 10.2 (stop-distance floor): the floor widens
     # too-tight stops, the ceiling narrows too-aggressive entry buffers.
     lmt_buffer_max_pct: float = 7.0
+    # Phase 12.5 — when an entry LMT is cancelled by IBKR with Error 202
+    # (limit price more aggressive than the ~9.78%-above-current-market
+    # threshold), the executor parses the suggested ceiling from the
+    # error string and re-submits the bracket once at that ceiling minus
+    # one tick. Without this, fast-fading breakouts (entry above current
+    # market by the time IBKR processes the order) get cancelled and
+    # the trade is missed -- next bar's strategy decision applies but
+    # may not re-emit. Disable to restore pre-12.5 single-shot behaviour.
+    lmt_aggressive_limit_retry: bool = True
 
     @model_validator(mode="after")
     def _validate_scale_out_multiple(self) -> ExecutionConfig:

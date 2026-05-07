@@ -340,6 +340,11 @@ class GapAndGoStrategy(Strategy):
             pullback_lookback_bars=PULLBACK_LOOKBACK_BARS,
             bars_available_for_lookback=bars_available_for_lookback,
             vwap_at_entry=last_vwap,
+            # Phase 12.5: prior bar close is the most recent fully-quoted
+            # market price before the candidate breakout. The LMT buffer
+            # ceiling anchors on ``min(entry, this)`` to avoid Error 202
+            # on bars where the breakout close sits well above market.
+            market_anchor_price=_prior_bar_close(bars),
         )
 
     def _minutes_since_open(self, ts: pd.Timestamp) -> int:
@@ -370,5 +375,22 @@ def _recent_volume(bars: pd.DataFrame) -> int | None:
     raw = bars["volume"].iloc[-1]
     try:
         return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prior_bar_close(bars: pd.DataFrame) -> float | None:
+    """Phase 12.5 — return the close of the bar immediately before the candidate, or None.
+
+    The candidate breakout bar is at ``bars.iloc[-1]``; the prior bar is
+    ``bars.iloc[-2]``. When fewer than two bars exist (very early in the
+    session, defensive against synthetic test fixtures), returns None
+    and the executor falls back to the legacy entry-anchored ceiling.
+    """
+    if len(bars) < 2 or "close" not in bars.columns:
+        return None
+    raw = bars["close"].iloc[-2]
+    try:
+        return float(raw)
     except (TypeError, ValueError):
         return None

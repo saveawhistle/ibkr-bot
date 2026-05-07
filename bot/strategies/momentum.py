@@ -305,6 +305,9 @@ class MomentumStrategy(Strategy):
             pullback_lookback_bars=_FLAG_LOOKBACK,
             bars_available_for_lookback=bars_available_for_lookback,
             vwap_at_entry=last_vwap,
+            # Phase 12.5: prior bar close as the LMT-buffer-ceiling anchor.
+            # See gap_and_go for rationale.
+            market_anchor_price=_prior_bar_close(bars),
         )
 
     def _within_window(self, ts: pd.Timestamp) -> bool:
@@ -324,5 +327,16 @@ def _recent_volume(bars: pd.DataFrame) -> int | None:
     raw = bars["volume"].iloc[-1]
     try:
         return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prior_bar_close(bars: pd.DataFrame) -> float | None:
+    """Phase 12.5 — return the close of the bar immediately before the candidate, or None."""
+    if len(bars) < 2 or "close" not in bars.columns:
+        return None
+    raw = bars["close"].iloc[-2]
+    try:
+        return float(raw)
     except (TypeError, ValueError):
         return None
