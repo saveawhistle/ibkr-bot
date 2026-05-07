@@ -55,6 +55,9 @@ class MomentumStrategy(Strategy):
         premarket_high_cap_enabled: bool = True,
         stop_floor_min_abs: float = 0.05,
         stop_floor_min_pct: float = 0.02,
+        catalyst_required: bool = False,
+        recent_rvol_min: float = 2.0,
+        recent_rvol_window_bars: int = 20,
     ) -> None:
         """Store pullback envelope, scale-out R-multiple, extension config, window end.
 
@@ -84,6 +87,14 @@ class MomentumStrategy(Strategy):
         self.premarket_high_cap_enabled = premarket_high_cap_enabled
         self.stop_floor_min_abs = stop_floor_min_abs
         self.stop_floor_min_pct = stop_floor_min_pct
+        # Phase 12.4: per-strategy admission flag. ``catalyst_required=False``
+        # (momentum default) means this strategy admits ScanHits regardless
+        # of catalyst-classifier outcome -- the bull-flag pattern is itself
+        # the entry signal.
+        self.catalyst_required = catalyst_required
+        # Phase 12.4: moment-of-entry breakout-bar volume validation.
+        self.recent_rvol_min = recent_rvol_min
+        self.recent_rvol_window_bars = recent_rvol_window_bars
 
     def evaluate(self, symbol: str, bars: pd.DataFrame) -> Signal | None:
         """Emit a Signal if the latest bar breaks HOD out of a bull flag."""

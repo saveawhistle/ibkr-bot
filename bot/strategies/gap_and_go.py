@@ -61,6 +61,9 @@ class GapAndGoStrategy(Strategy):
         premarket_high_cap_enabled: bool = True,
         stop_floor_min_abs: float = 0.05,
         stop_floor_min_pct: float = 0.02,
+        catalyst_required: bool = True,
+        recent_rvol_min: float = 2.0,
+        recent_rvol_window_bars: int = 20,
     ) -> None:
         """Store scale-out multiple, grace window, extension config, window end.
 
@@ -98,6 +101,13 @@ class GapAndGoStrategy(Strategy):
         self.premarket_high_cap_enabled = premarket_high_cap_enabled
         self.stop_floor_min_abs = stop_floor_min_abs
         self.stop_floor_min_pct = stop_floor_min_pct
+        # Phase 12.4: per-strategy admission flag, consumed by the orchestrator's
+        # dispatcher. ``catalyst_required=True`` (gap-and-go default) means
+        # this strategy only sees ``ScanHit``s with ``catalyst_confirmed=True``.
+        self.catalyst_required = catalyst_required
+        # Phase 12.4: moment-of-entry breakout-bar volume validation.
+        self.recent_rvol_min = recent_rvol_min
+        self.recent_rvol_window_bars = recent_rvol_window_bars
 
     def evaluate(self, symbol: str, bars: pd.DataFrame) -> Signal | None:
         """Emit a Signal if the latest bar triggers a gap-and-go entry, else None."""
