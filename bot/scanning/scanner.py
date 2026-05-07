@@ -736,9 +736,7 @@ class IBKRScanner:
         s = self._settings.strategies
         if s.gap_and_go.enabled and not s.gap_and_go.catalyst_required:
             return True
-        if s.momentum.enabled and not s.momentum.catalyst_required:
-            return True
-        return False
+        return bool(s.momentum.enabled and not s.momentum.catalyst_required)
 
     def _eligible_strategies_for(self, hit: ScanHit) -> list[str]:
         """Phase 12.4 — return the names of enabled strategies that admit this hit.

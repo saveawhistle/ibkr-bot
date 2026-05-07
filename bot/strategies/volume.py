@@ -27,9 +27,9 @@ evaluations and avoids sync issues if bars are ever backfilled.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
 
 import pandas as pd
 import structlog

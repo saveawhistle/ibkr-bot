@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
@@ -36,7 +35,6 @@ from bot.scanning.scanner import IBKRScanner, ScanHit
 from bot.strategies.gap_and_go import GapAndGoStrategy
 from bot.strategies.momentum import MomentumStrategy
 from bot.strategies.volume import check_recent_window_rvol
-
 
 # ---------- Fixture helpers ----------
 
@@ -69,7 +67,7 @@ def _rising_bar_frame(
     base_close = last_close - 0.05  # prior bars sit just under breakout close
     base_low = starting_low
     base_high = base_close + 0.01
-    for i in range(bar_count - 1):
+    for _i in range(bar_count - 1):
         # Rising series so HOD breaks cleanly on the last bar; volume flat.
         bars.append(
             {
