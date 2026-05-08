@@ -87,7 +87,13 @@ def _rising_bar_frame(
             "volume": last_volume,
         }
     )
-    timestamps = [_ny_ts(9, 30) + timedelta(minutes=i) for i in range(bar_count)]
+    # Phase 12.6: anchor fixtures at 10:00 ET so they land inside both
+    # gap-and-go's default opening window (09:30-10:00 -- gap_and_go
+    # tests pass via the explicit ``vwap_extension_grace_minutes=60``
+    # bypass, not the timestamp anchor) AND momentum's default
+    # window_start of 10:00. Pre-12.6 fixtures stamped at 09:30
+    # silently dropped under momentum's new ``_within_window``.
+    timestamps = [_ny_ts(10, 0) + timedelta(minutes=i) for i in range(bar_count)]
     df = pd.DataFrame(bars, index=pd.DatetimeIndex(timestamps))
     return df
 

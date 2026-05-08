@@ -786,6 +786,12 @@ class MomentumConfig(BaseModel):
     * ``recent_rvol_min`` / ``recent_rvol_window_bars``: same shape as
       gap-and-go. Default 2.0× over 20 1-minute bars (Ross's published
       threshold for momentum entries).
+
+    Phase 12.6 adds ``window_start`` so the operator can sequence the
+    two strategies non-overlappingly: gap-and-go covers the opening
+    window (always starts at 09:30), momentum picks up where it leaves
+    off. Default ``"10:00"`` matches the published 30-minute opening
+    sweet spot for gap-and-go.
     """
 
     enabled: bool = True
@@ -794,10 +800,19 @@ class MomentumConfig(BaseModel):
     # has no grace-period bypass (it's an ongoing-intraday pattern, not an
     # opening-range play), so this multiple gates *every* momentum bar.
     extended_from_vwap_atr_multiple: float = 5.0
+    # Phase 12.6 — configurable start of the momentum evaluation window
+    # (HH:MM, NY-local). Pre-12.6 was hardcoded at 09:30 (market open),
+    # which meant momentum and gap-and-go ran concurrently in the
+    # opening window. Default ``"10:00"`` non-overlaps gap-and-go's
+    # default window_end so the two strategies sequence naturally:
+    # gap-and-go 09:30-10:00, momentum 10:00-window_end. Validator
+    # enforces window_start >= 09:30 (no premarket evaluation) and
+    # window_start < window_end.
+    window_start: str = "10:00"
     # Phase 6.7 — configurable end of the momentum evaluation window
-    # (HH:MM, NY-local). Window start is always 09:30 ET (market open).
-    # Default ``11:30`` preserves the pre-6.7 hardcoded cutoff; widen for
-    # off-hours testing (``"16:00"``) without touching code.
+    # (HH:MM, NY-local). Default ``11:30`` preserves the pre-6.7
+    # hardcoded cutoff; widen for off-hours testing (``"16:00"``)
+    # without touching code.
     window_end: str = "16:00"
     # Phase 12.4 — strategy-differentiation. Momentum admits tickers
     # without catalyst confirmation; the bull-flag pattern is the entry
@@ -829,6 +844,56 @@ class MomentumConfig(BaseModel):
         """Phase 6.7 — HH:MM, strictly after 09:30 market open."""
         _parse_strategy_hh_mm("strategies.momentum.window_end", value)
         return value
+
+    @field_validator("window_start")
+    @classmethod
+    def _validate_window_start(cls, value: str) -> str:
+        """Phase 12.6 — HH:MM, NY-local; must be >= 09:30 ET market open.
+
+        Cross-field check ``window_start < window_end`` lives in the
+        ``model_validator`` below since pydantic field validators don't
+        see other fields.
+        """
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"strategies.momentum.window_start must be HH:MM, got {value!r}")
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                f"strategies.momentum.window_start must be HH:MM, got {value!r}"
+            ) from exc
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(
+                f"strategies.momentum.window_start must be a valid HH:MM, got {value!r}"
+            )
+        if (hour, minute) < (9, 30):
+            raise ValueError(
+                f"strategies.momentum.window_start must be >= 09:30 ET market open, "
+                f"got {value!r}; momentum doesn't evaluate premarket bars."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_window_bounds(self) -> MomentumConfig:
+        """Phase 12.6 — cross-field: window_start must be strictly before window_end.
+
+        ``window_start`` and ``window_end`` are already format-validated by
+        their respective field validators. We just need to compare them,
+        not re-validate format. Avoid the shared ``_parse_strategy_hh_mm``
+        helper since it rejects values at-or-before 09:30 -- legal for
+        ``window_start`` (== 09:30 is allowed) but illegal for end.
+        """
+        start_h, start_m = (int(p) for p in self.window_start.split(":"))
+        end_h, end_m = (int(p) for p in self.window_end.split(":"))
+        if (start_h, start_m) >= (end_h, end_m):
+            raise ValueError(
+                f"strategies.momentum.window_start ({self.window_start!r}) must be "
+                f"strictly before window_end ({self.window_end!r}); a window that "
+                "starts at or after its end evaluates zero bars."
+            )
+        return self
 
     @field_validator("recent_rvol_min")
     @classmethod

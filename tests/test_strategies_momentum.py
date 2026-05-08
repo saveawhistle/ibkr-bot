@@ -33,7 +33,24 @@ def _frame(
 
 
 def _times(start_minute: int = 30, count: int = 10) -> list[str]:
-    return [f"2026-04-16 09:{start_minute + i:02d}" for i in range(count)]
+    """Build timestamps starting at 10:30 + ``start_minute - 30`` minutes.
+
+    Phase 12.6: momentum's default window now starts at 10:00 ET, so
+    pre-12.6 fixtures stamped at 09:30 silently dropped under
+    ``_within_window``. Fixture moves to 10:30 to land cleanly inside
+    the 10:00-11:30 default window. The ``start_minute`` argument
+    semantics are preserved (callers passing 30 still get a 30-bar
+    offset from 10:00) for back-compat with the dozen call sites.
+    """
+    base_minute = 30  # baseline 10:30 anchor
+    offset = start_minute - 30  # caller's offset relative to the legacy 30 default
+    out: list[str] = []
+    for i in range(count):
+        total = base_minute + offset + i
+        hour = 10 + total // 60
+        minute = total % 60
+        out.append(f"2026-04-16 {hour:02d}:{minute:02d}")
+    return out
 
 
 def test_emits_signal_on_bull_flag_hod_break() -> None:

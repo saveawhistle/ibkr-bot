@@ -69,7 +69,7 @@ execution:
   # floor: floor widens too-tight stops, ceiling narrows too-aggressive
   # entry buffers. Without this, the floor produces 13% LMT buffers on
   # $1 stocks — see SHPH 2026-05-01 13:53:50 UTC Error 202 incident.
-  lmt_buffer_max_pct: 7.0
+  lmt_buffer_max_pct: 5.0
   # Phase 12.5 — IBKR Error 202 (aggressive-LMT cancel) recovery. When the
   # entry LMT is cancelled by IBKR because it sits above ~9.78% of current
   # market, the executor parses the suggested ceiling from the error
@@ -127,7 +127,13 @@ strategies:
     enabled: true
     flag_max_pullback_pct: 5.0
     extended_from_vwap_atr_multiple: 20.0 # Phase 6.6: raised from 3.0 — 10 rejections (ELPW/TORO/ZENA/BTM/ENVB) on Day 3 against normal continuation
-    window_end: "16:00"                  # Phase 6.7: evaluate bars only before this HH:MM (NY-local). Widen for off-hours testing (e.g. "16:00"). Start is always 09:30 ET.
+    # Phase 12.6 — momentum window start. Pre-12.6 was hardcoded at 09:30, which
+    # ran momentum and gap-and-go concurrently in the opening window. Default
+    # "10:00" non-overlaps gap-and-go (09:30–10:00) so the two strategies
+    # sequence naturally: gap-and-go owns the opening, momentum picks up
+    # afterwards. Set to "09:30" to restore concurrent evaluation.
+    window_start: "10:00"
+    window_end: "11:30"                  # Phase 6.7: evaluate bars only before this HH:MM (NY-local). Widen for off-hours testing (e.g. "16:00").
     # Phase 12.4 — strategy-differentiation. Ross treats catalyst as ideal-but-not-required for momentum continuation; the bull-flag pattern is the entry signal in its own right.
     catalyst_required: false             # tickers without confirmed catalyst still admitted to this strategy
     recent_rvol_min: 2.0                 # Ross's published 2× threshold for momentum entries
