@@ -245,12 +245,14 @@ def build_default_strategies(settings: Settings | None = None) -> list[Strategy]
         )
     if s.strategies.momentum.enabled:
         mom_cfg = s.strategies.momentum
+        mom_start_h, mom_start_m = _parse_hh_mm(mom_cfg.window_start)
         mom_end_h, mom_end_m = _parse_hh_mm(mom_cfg.window_end)
         strategies.append(
             MomentumStrategy(
                 flag_max_pullback_pct=mom_cfg.flag_max_pullback_pct,
                 extended_from_vwap_atr_multiple=mom_cfg.extended_from_vwap_atr_multiple,
                 log_extension_check_passes=log_passes,
+                window_start=time(mom_start_h, mom_start_m),
                 window_end=time(mom_end_h, mom_end_m),
                 premarket_high_cap_enabled=s.strategies.premarket_high_cap_enabled,
                 stop_floor_min_abs=floor_min_abs,

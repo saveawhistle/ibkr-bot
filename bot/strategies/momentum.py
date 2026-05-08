@@ -24,7 +24,11 @@ from bot.strategies.base import (
 )
 from bot.strategies.volume import check_recent_window_rvol
 
-_WINDOW_START = time(9, 30)
+_DEFAULT_WINDOW_START = time(10, 0)
+"""Phase 12.6 — default momentum window start. Pre-12.6 was hardcoded at
+09:30; raised to 10:00 so the strategy non-overlaps gap-and-go's default
+opening window. Operators can still set it to any value >= 09:30 via
+``strategies.momentum.window_start``."""
 _FLAG_LOOKBACK = 10
 
 _log = structlog.get_logger("bot.strategies.momentum")
@@ -52,6 +56,7 @@ class MomentumStrategy(Strategy):
         scale_out_multiple: float = 2.0,
         extended_from_vwap_atr_multiple: float = 5.0,
         log_extension_check_passes: bool = False,
+        window_start: time | None = None,
         window_end: time = time(11, 30),
         premarket_high_cap_enabled: bool = True,
         stop_floor_min_abs: float = 0.05,
@@ -84,6 +89,13 @@ class MomentumStrategy(Strategy):
         self.flag_max_pullback_pct = flag_max_pullback_pct
         self.extended_from_vwap_atr_multiple = extended_from_vwap_atr_multiple
         self.log_extension_check_passes = log_extension_check_passes
+        # Phase 12.6 — configurable window start so momentum can be
+        # sequenced after gap-and-go. ``_within_window`` uses this
+        # instance attribute instead of the legacy module-level constant.
+        # ``None`` resolves to the current ``_DEFAULT_WINDOW_START`` at
+        # construction time so a conftest monkeypatch (legacy-test
+        # compatibility) takes effect.
+        self.window_start = window_start if window_start is not None else _DEFAULT_WINDOW_START
         self.window_end = window_end
         self.premarket_high_cap_enabled = premarket_high_cap_enabled
         self.stop_floor_min_abs = stop_floor_min_abs
@@ -311,13 +323,18 @@ class MomentumStrategy(Strategy):
         )
 
     def _within_window(self, ts: pd.Timestamp) -> bool:
-        """True iff ``ts`` (NY-local) sits in the 09:30–``window_end`` momentum window.
+        """True iff ``ts`` (NY-local) sits in the ``window_start``-``window_end`` window.
 
         Phase 6.7 — end is per-instance so tests / operator can widen the
         window at config time without touching the module constant.
+
+        Phase 12.6 — start is also per-instance. Default 10:00 ET so
+        momentum non-overlaps gap-and-go's default opening window;
+        operator can still set it back to 09:30 ET via config to
+        restore concurrent evaluation.
         """
         local = ts.time()
-        return bool(_WINDOW_START <= local < self.window_end)
+        return bool(self.window_start <= local < self.window_end)
 
 
 def _recent_volume(bars: pd.DataFrame) -> int | None:

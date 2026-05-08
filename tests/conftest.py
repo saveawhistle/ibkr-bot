@@ -56,10 +56,45 @@ def _disable_recent_rvol_by_default(
     monkeypatch.setattr("bot.strategies.momentum.check_recent_window_rvol", _noop)
 
 
+@pytest.fixture(autouse=True)
+def _pin_legacy_momentum_window_start(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 12.6: pin the momentum default window_start back to 09:30 for legacy tests.
+
+    Pre-12.6, ``MomentumStrategy`` started evaluating bars at the 09:30
+    market open. Phase 12.6 raised that default to 10:00 so momentum
+    sequences after gap-and-go's opening window. Many pre-existing
+    tests construct ``MomentumStrategy()`` without an explicit
+    ``window_start`` and use 09:30+ bar fixtures -- they'd silently
+    drop those bars under the new default.
+
+    The autouse fixture rewrites the class default back to 09:30 for
+    every test except those marked ``@pytest.mark.momentum_default_window_start``,
+    which opt in to the production 10:00 default. The Phase 12.6
+    dedicated tests (test_momentum_window_start.py) construct the
+    strategy with explicit window_start values so the rewrite is a
+    no-op for them.
+    """
+    if request.node.get_closest_marker("momentum_default_window_start"):
+        return
+    from datetime import time as _time
+
+    from bot.strategies import momentum as _mom_module
+
+    monkeypatch.setattr(_mom_module, "_DEFAULT_WINDOW_START", _time(9, 30))
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers so ``--strict-markers`` runs stay clean."""
     config.addinivalue_line(
         "markers",
         "recent_rvol_enabled: Phase 12.4 -- exercise the breakout-bar RVOL "
         "suppression gate (default-disabled by conftest autouse fixture).",
+    )
+    config.addinivalue_line(
+        "markers",
+        "momentum_default_window_start: Phase 12.6 -- exercise the production "
+        "10:00 default for momentum.window_start (autouse fixture pins back "
+        "to 09:30 for legacy compat otherwise).",
     )
