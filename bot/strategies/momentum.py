@@ -443,13 +443,14 @@ def _apply_entry_quality_gates(
         bar_time=bar_time,
     ):
         return True
-    if cfg.vwap_extension_enabled and check_vwap_extension(
-        bars=bars,
-        candidate_price=candidate_price,
-        max_extension_above_vwap_pct=cfg.max_extension_above_vwap_pct,
-        symbol=symbol,
-        strategy=strategy,
-        bar_time=bar_time,
-    ):
-        return True
-    return False
+    return bool(
+        cfg.vwap_extension_enabled
+        and check_vwap_extension(
+            bars=bars,
+            candidate_price=candidate_price,
+            max_extension_above_vwap_pct=cfg.max_extension_above_vwap_pct,
+            symbol=symbol,
+            strategy=strategy,
+            bar_time=bar_time,
+        )
+    )
