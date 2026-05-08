@@ -123,6 +123,28 @@ strategies:
     catalyst_required: true              # tickers without confirmed catalyst (LLM qualifies=true) are NOT admitted to this strategy
     recent_rvol_min: 2.0                 # breakout-bar volume must be >= N × prior-window-average for signal to fire
     recent_rvol_window_bars: 20          # rolling average over last N 1-min bars (sanity floor: 5)
+    # Phase 13 — entry-quality gates supplementing is_bull_flag + recent-RVOL.
+    # Forensic origin: reports/momentum_failures_2026_05_08.md (AEHL/TRAW/AIIO).
+    entry_quality:
+      # H1: Impulse strength (from 2026-05-08 momentum forensic)
+      impulse_strength_enabled: true
+      impulse_window_bars: 3
+      impulse_min_pct_move: 1.5
+      impulse_min_slope_ratio: 1.005
+      # H2: Consolidation tightness (from 2026-05-08 momentum forensic)
+      consolidation_tightness_enabled: true
+      consolidation_window_bars: 6
+      consolidation_max_range_pct: 4.0
+      # Volume contraction (TRAW pattern, 2026-05-08)
+      volume_contraction_enabled: true
+      max_consolidation_to_impulse_volume_ratio: 0.8
+      # VWAP extension (AIIO pattern, 2026-05-08)
+      vwap_extension_enabled: true
+      max_extension_above_vwap_pct: 5.0
+      # Halt detection (AEHL pattern, 2026-05-08)
+      halt_detection_enabled: true
+      max_bar_gap_minutes: 5.0
+      halt_detection_rth_only: true
   momentum:
     enabled: true
     flag_max_pullback_pct: 5.0
@@ -138,6 +160,30 @@ strategies:
     catalyst_required: false             # tickers without confirmed catalyst still admitted to this strategy
     recent_rvol_min: 2.0                 # Ross's published 2× threshold for momentum entries
     recent_rvol_window_bars: 20
+    # Phase 13 — entry-quality gates supplementing is_bull_flag + recent-RVOL.
+    # Same defaults as gap_and_go for first deployment; per-strategy tuning
+    # left for follow-up calibration (e.g. momentum may want a wider
+    # consolidation_max_range_pct since later-day setups consolidate slower).
+    entry_quality:
+      # H1: Impulse strength (from 2026-05-08 momentum forensic)
+      impulse_strength_enabled: true
+      impulse_window_bars: 3
+      impulse_min_pct_move: 1.5
+      impulse_min_slope_ratio: 1.005
+      # H2: Consolidation tightness (from 2026-05-08 momentum forensic)
+      consolidation_tightness_enabled: true
+      consolidation_window_bars: 6
+      consolidation_max_range_pct: 4.0
+      # Volume contraction (TRAW pattern, 2026-05-08)
+      volume_contraction_enabled: true
+      max_consolidation_to_impulse_volume_ratio: 0.8
+      # VWAP extension (AIIO pattern, 2026-05-08)
+      vwap_extension_enabled: true
+      max_extension_above_vwap_pct: 5.0
+      # Halt detection (AEHL pattern, 2026-05-08)
+      halt_detection_enabled: true
+      max_bar_gap_minutes: 5.0
+      halt_detection_rth_only: true
 
 ibkr:
   host: 127.0.0.1
