@@ -93,6 +93,7 @@ def bootstrap_advisor(config: Settings) -> ExitAdvisor | None:
             hook_acts=cfg.hook_acts,
             self_disable_failure_rate=cfg.self_disable_failure_rate,
             self_disable_min_calls=cfg.self_disable_min_calls,
+            min_hold_minutes_for_full_exit=cfg.min_hold_minutes_for_full_exit,
         )
     except Exception:
         _log.exception("advisor.bootstrap_failed", model=cfg.llm_model)

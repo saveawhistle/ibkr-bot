@@ -1681,6 +1681,7 @@ class ExitAdvisorConfig(BaseModel):
     event_buffer_hard_floor_seconds: float = 10.0
     self_disable_failure_rate: float = 0.5
     self_disable_min_calls: int = 5
+    min_hold_minutes_for_full_exit: float = 3.0
 
     @field_validator("timeout_seconds", "llm_timeout_seconds")
     @classmethod
@@ -1708,6 +1709,16 @@ class ExitAdvisorConfig(BaseModel):
         if value < 0.0:
             raise ValueError(
                 f"exit_advisor event-buffer floors must be >= 0.0 seconds (got {value})."
+            )
+        return value
+
+    @field_validator("min_hold_minutes_for_full_exit")
+    @classmethod
+    def _validate_min_hold_minutes(cls, value: float) -> float:
+        """0.0 disables the floor; negatives are rejected."""
+        if value < 0.0:
+            raise ValueError(
+                f"exit_advisor.min_hold_minutes_for_full_exit must be >= 0.0 (got {value})."
             )
         return value
 

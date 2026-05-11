@@ -169,6 +169,7 @@ class _PerTradeContext:
     trade_state: _LiveTradeState
     buffer: EventBuffer
     counters: _CallCounters = field(default_factory=_CallCounters)
+    first_event_timestamp: datetime | None = None
 
 
 class ExitAdvisor:
@@ -201,6 +202,7 @@ class ExitAdvisor:
         self_disable_failure_rate: float = SELF_DISABLE_FAILURE_RATE,
         self_disable_min_calls: int = SELF_DISABLE_MIN_CALLS,
         notify_callback: Any = None,
+        min_hold_minutes_for_full_exit: float = 0.0,
     ) -> None:
         self._llm_client = llm_client
         self._cost_tracker = cost_tracker
@@ -210,6 +212,7 @@ class ExitAdvisor:
         self._self_disable_failure_rate = self_disable_failure_rate
         self._self_disable_min_calls = self_disable_min_calls
         self._notify_callback = notify_callback
+        self._min_hold_seconds_for_full_exit = min_hold_minutes_for_full_exit * 60.0
         self._self_disabled = False
         self._contexts: dict[str, _PerTradeContext] = {}
 
@@ -284,6 +287,9 @@ class ExitAdvisor:
                 evaluation_performed=False,
                 reasoning="cost_cap_reached",
             )
+
+        if ctx.first_event_timestamp is None:
+            ctx.first_event_timestamp = event.timestamp
 
         ctx.trade_state.update_from_event(event, position)
 
@@ -362,6 +368,39 @@ class ExitAdvisor:
                 evaluation_performed=True,
                 reasoning=recommendation.reason,
             )
+
+        # Minimum-hold floor: suppress exit_full recommendations that arrive
+        # before the configured floor has elapsed. Momentum trades need time
+        # to develop; acting within the first few minutes captures noise, not signal.
+        # Uses first_event_timestamp (not entry_timestamp) to avoid the tz-alignment
+        # reset that _LiveTradeState applies to entry_timestamp on first event.
+        if (
+            recommendation.action == "exit_full"
+            and self._min_hold_seconds_for_full_exit > 0.0
+            and ctx.first_event_timestamp is not None
+        ):
+            time_in_trade = (event.timestamp - ctx.first_event_timestamp).total_seconds()
+            if time_in_trade < self._min_hold_seconds_for_full_exit:
+                ctx.counters.held_calls += 1
+                _log.info(
+                    "advisor.early_exit_suppressed",
+                    symbol=position.symbol,
+                    event_type=type(event).__name__,
+                    time_in_trade_seconds=round(time_in_trade, 1),
+                    floor_seconds=self._min_hold_seconds_for_full_exit,
+                    llm_action=recommendation.action,
+                    llm_reasoning=recommendation.reason,
+                    cost_usd=round(result.cost_usd, 6),
+                )
+                return AdvisorResponse(
+                    recommendation=None,
+                    evaluation_performed=True,
+                    reasoning=(
+                        f"exit_full suppressed: {round(time_in_trade)}s elapsed, "
+                        f"floor is {int(self._min_hold_seconds_for_full_exit)}s. "
+                        f"LLM reasoning: {recommendation.reason}"
+                    ),
+                )
 
         ctx.counters.actionable_calls += 1
         _log.info(
