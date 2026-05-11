@@ -667,6 +667,78 @@ class UniverseConfig(BaseModel):
     premarket_vol_min: int = 300_000
 
 
+class EntryQualityConfig(BaseModel):
+    """Phase 13 — entry-quality gate parameters (per-strategy).
+
+    Five structural gates supplementing ``is_bull_flag`` and Phase 12.4's
+    recent-window RVOL check. Forensic origin:
+    ``reports/momentum_failures_2026_05_08.md`` -- AEHL/TRAW/AIIO losing
+    momentum trades on 2026-05-08 each exhibited one or more of:
+
+    * H1 -- weak/absent impulse before the "flag"
+    * H2 -- sloppy consolidation range
+    * No volume contraction during consolidation (TRAW)
+    * Excessive VWAP extension at entry (AIIO)
+    * Halt-related sparse bars before breakout (AEHL)
+
+    Each gate is independently enable/disable controlled. Gates default
+    ON with the calibrated thresholds from the forensic. Each gate that
+    needs N+ bars to compute returns "proceed" (no rejection) when fewer
+    bars are available -- consistent with the "permissive on incomplete
+    data" stance of the existing strategy code.
+    """
+
+    # H1: Impulse strength (from 2026-05-08 forensic)
+    impulse_strength_enabled: bool = True
+    impulse_window_bars: int = 3
+    impulse_min_pct_move: float = 1.5  # percent
+    impulse_min_slope_ratio: float = 1.005  # last_close / first_open
+
+    # H2: Consolidation tightness (from 2026-05-08 forensic)
+    consolidation_tightness_enabled: bool = True
+    consolidation_window_bars: int = 6
+    consolidation_max_range_pct: float = 4.0  # percent of impulse high
+
+    # Volume contraction (TRAW pattern, 2026-05-08)
+    volume_contraction_enabled: bool = True
+    max_consolidation_to_impulse_volume_ratio: float = 0.8
+
+    # VWAP extension (AIIO pattern, 2026-05-08)
+    vwap_extension_enabled: bool = True
+    max_extension_above_vwap_pct: float = 5.0
+
+    # Halt detection (AEHL pattern, 2026-05-08)
+    halt_detection_enabled: bool = True
+    max_bar_gap_minutes: float = 5.0
+    halt_detection_rth_only: bool = True
+
+    @field_validator(
+        "impulse_min_pct_move",
+        "consolidation_max_range_pct",
+        "max_extension_above_vwap_pct",
+        "max_bar_gap_minutes",
+    )
+    @classmethod
+    def _must_be_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("must be > 0")
+        return value
+
+    @field_validator("max_consolidation_to_impulse_volume_ratio", "impulse_min_slope_ratio")
+    @classmethod
+    def _ratio_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("must be > 0")
+        return value
+
+    @field_validator("impulse_window_bars", "consolidation_window_bars")
+    @classmethod
+    def _bars_min(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be >= 1")
+        return value
+
+
 class GapAndGoConfig(BaseModel):
     """Gap-and-Go strategy parameters.
 
@@ -711,6 +783,8 @@ class GapAndGoConfig(BaseModel):
     catalyst_required: bool = True
     recent_rvol_min: float = 2.0
     recent_rvol_window_bars: int = 20
+    # Phase 13 — entry-quality gates (per-strategy). See EntryQualityConfig.
+    entry_quality: EntryQualityConfig = Field(default_factory=EntryQualityConfig)
 
     @field_validator("vwap_extension_grace_minutes")
     @classmethod
@@ -820,6 +894,8 @@ class MomentumConfig(BaseModel):
     catalyst_required: bool = False
     recent_rvol_min: float = 2.0
     recent_rvol_window_bars: int = 20
+    # Phase 13 — entry-quality gates (per-strategy). See EntryQualityConfig.
+    entry_quality: EntryQualityConfig = Field(default_factory=EntryQualityConfig)
 
     @field_validator("extended_from_vwap_atr_multiple")
     @classmethod
@@ -1605,6 +1681,7 @@ class ExitAdvisorConfig(BaseModel):
     event_buffer_hard_floor_seconds: float = 10.0
     self_disable_failure_rate: float = 0.5
     self_disable_min_calls: int = 5
+    min_hold_minutes_for_full_exit: float = 3.0
 
     @field_validator("timeout_seconds", "llm_timeout_seconds")
     @classmethod
@@ -1632,6 +1709,16 @@ class ExitAdvisorConfig(BaseModel):
         if value < 0.0:
             raise ValueError(
                 f"exit_advisor event-buffer floors must be >= 0.0 seconds (got {value})."
+            )
+        return value
+
+    @field_validator("min_hold_minutes_for_full_exit")
+    @classmethod
+    def _validate_min_hold_minutes(cls, value: float) -> float:
+        """0.0 disables the floor; negatives are rejected."""
+        if value < 0.0:
+            raise ValueError(
+                f"exit_advisor.min_hold_minutes_for_full_exit must be >= 0.0 (got {value})."
             )
         return value
 

@@ -123,6 +123,28 @@ strategies:
     catalyst_required: true              # tickers without confirmed catalyst (LLM qualifies=true) are NOT admitted to this strategy
     recent_rvol_min: 2.0                 # breakout-bar volume must be >= N × prior-window-average for signal to fire
     recent_rvol_window_bars: 20          # rolling average over last N 1-min bars (sanity floor: 5)
+    # Phase 13 — entry-quality gates supplementing is_bull_flag + recent-RVOL.
+    # Forensic origin: reports/momentum_failures_2026_05_08.md (AEHL/TRAW/AIIO).
+    entry_quality:
+      # H1: Impulse strength (from 2026-05-08 momentum forensic)
+      impulse_strength_enabled: true
+      impulse_window_bars: 3
+      impulse_min_pct_move: 1.5
+      impulse_min_slope_ratio: 1.005
+      # H2: Consolidation tightness (from 2026-05-08 momentum forensic)
+      consolidation_tightness_enabled: true
+      consolidation_window_bars: 6
+      consolidation_max_range_pct: 4.0
+      # Volume contraction (TRAW pattern, 2026-05-08)
+      volume_contraction_enabled: true
+      max_consolidation_to_impulse_volume_ratio: 0.8
+      # VWAP extension (AIIO pattern, 2026-05-08)
+      vwap_extension_enabled: true
+      max_extension_above_vwap_pct: 5.0
+      # Halt detection (AEHL pattern, 2026-05-08)
+      halt_detection_enabled: true
+      max_bar_gap_minutes: 5.0
+      halt_detection_rth_only: true
   momentum:
     enabled: true
     flag_max_pullback_pct: 5.0
@@ -132,12 +154,36 @@ strategies:
     # "10:00" non-overlaps gap-and-go (09:30–10:00) so the two strategies
     # sequence naturally: gap-and-go owns the opening, momentum picks up
     # afterwards. Set to "09:30" to restore concurrent evaluation.
-    window_start: "10:00"
+    window_start: "9:45"
     window_end: "11:30"                  # Phase 6.7: evaluate bars only before this HH:MM (NY-local). Widen for off-hours testing (e.g. "16:00").
     # Phase 12.4 — strategy-differentiation. Ross treats catalyst as ideal-but-not-required for momentum continuation; the bull-flag pattern is the entry signal in its own right.
     catalyst_required: false             # tickers without confirmed catalyst still admitted to this strategy
     recent_rvol_min: 2.0                 # Ross's published 2× threshold for momentum entries
     recent_rvol_window_bars: 20
+    # Phase 13 — entry-quality gates supplementing is_bull_flag + recent-RVOL.
+    # Same defaults as gap_and_go for first deployment; per-strategy tuning
+    # left for follow-up calibration (e.g. momentum may want a wider
+    # consolidation_max_range_pct since later-day setups consolidate slower).
+    entry_quality:
+      # H1: Impulse strength (from 2026-05-08 momentum forensic)
+      impulse_strength_enabled: true
+      impulse_window_bars: 3
+      impulse_min_pct_move: 1.5
+      impulse_min_slope_ratio: 1.005
+      # H2: Consolidation tightness (from 2026-05-08 momentum forensic)
+      consolidation_tightness_enabled: true
+      consolidation_window_bars: 6
+      consolidation_max_range_pct: 4.0
+      # Volume contraction (TRAW pattern, 2026-05-08)
+      volume_contraction_enabled: true
+      max_consolidation_to_impulse_volume_ratio: 0.8
+      # VWAP extension (AIIO pattern, 2026-05-08)
+      vwap_extension_enabled: true
+      max_extension_above_vwap_pct: 5.0
+      # Halt detection (AEHL pattern, 2026-05-08)
+      halt_detection_enabled: true
+      max_bar_gap_minutes: 5.0
+      halt_detection_rth_only: true
 
 ibkr:
   host: 127.0.0.1
@@ -202,6 +248,7 @@ exit_advisor:
   event_buffer_hard_floor_seconds: 10.0    # absolute minimum gap between LLM calls (caps even always-trigger events)
   self_disable_failure_rate: 0.5           # advisor disables itself for the session at >50% LLM failure rate
   self_disable_min_calls: 5                # need at least this many calls before failure rate is meaningful
+  min_hold_minutes_for_full_exit: 3.0      # suppress exit_full recommendations within this many minutes of entry; 0.0 disables (XGN 2026-05-11: LLM exited at ~3 min, trade continued to break out)
 
 # --- Spike (exit-advisor): event taxonomy consumed by the trade-replay harness ---
 # Layers 1+2 ship time / pnl / order_state / price_levels / moving_averages /

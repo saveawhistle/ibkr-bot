@@ -75,6 +75,11 @@ level, not to recommend actions when price is approaching the stop.
 risk-per-share (would create a new naked-position situation).
 - Do not produce recommendations that contradict your own reasoning. If you say "the trade \
 looks weak," don't recommend "hold" — pick an action consistent with the analysis.
+- Do not recommend `exit_full` within the first 3 minutes of a trade \
+(time_in_trade_seconds < 180). Momentum trades need time to develop — the early bars \
+often look weak before the breakout extends. The mechanical stop handles catastrophic \
+early failure. Within the first 3 minutes, recommend `hold` unless a drawdown event \
+has already signaled structural failure of the trade.
 
 # Input format
 

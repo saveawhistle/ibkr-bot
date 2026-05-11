@@ -71,6 +71,7 @@ def _make_advisor(
     self_disable_min_calls: int = 5,
     self_disable_failure_rate: float = 0.5,
     notify_callback: Callable[[str], None] | None = None,
+    min_hold_minutes_for_full_exit: float = 0.0,
 ) -> ExitAdvisor:
     cost_tracker = CostTracker(soft_cap_usd=soft_cap, hard_cap_usd=hard_cap)
     return ExitAdvisor(
@@ -82,6 +83,7 @@ def _make_advisor(
         self_disable_failure_rate=self_disable_failure_rate,
         self_disable_min_calls=self_disable_min_calls,
         notify_callback=notify_callback,
+        min_hold_minutes_for_full_exit=min_hold_minutes_for_full_exit,
     )
 
 
@@ -375,3 +377,74 @@ def test_tracking_state_updates_peak_on_higher_bar() -> None:
     advisor.on_event(pos, bar2)
     assert advisor._contexts["ABC"].trade_state.peak_price == pytest.approx(1.20)
     assert advisor._contexts["ABC"].trade_state.current_price == pytest.approx(1.18)
+
+
+# ============================================================
+# min_hold_minutes_for_full_exit tests
+# ============================================================
+
+
+def _protected_event(t: datetime) -> PositionProtected:
+    return PositionProtected(
+        timestamp=t,
+        symbol="ABC",
+        entry_price=1.0,
+        initial_stop=0.9,
+        initial_scale_out=1.2,
+        position_size=100,
+    )
+
+
+def test_early_exit_full_suppressed_within_hold_floor() -> None:
+    """exit_full recommended within 3-minute floor becomes held, not actionable."""
+    llm = _FakeLLMClient(queued=[_success(action="exit_full")])
+    advisor = _make_advisor(llm, min_hold_minutes_for_full_exit=3.0)
+    pos = _FakePosition()
+    advisor.on_position_protected(pos)
+    # Event timestamp 90 s after entry — inside the 180 s floor.
+    event = _protected_event(_T0 + timedelta(seconds=90))
+    response = advisor.on_event(pos, event)
+    assert not response.is_actionable
+    assert response.is_held
+    assert "suppressed" in response.reasoning.lower()
+    assert len(llm.calls_seen) == 1  # LLM was still called; suppression is post-LLM
+
+
+def test_exit_full_allowed_after_hold_floor_elapsed() -> None:
+    """exit_full is not suppressed once the floor has passed."""
+    # Two events: first anchors first_event_timestamp at _T0, second triggers
+    # the LLM 4 minutes later — beyond the 180 s floor.
+    llm = _FakeLLMClient(queued=[_success(action="hold"), _success(action="exit_full")])
+    advisor = _make_advisor(llm, min_hold_minutes_for_full_exit=3.0)
+    pos = _FakePosition()
+    advisor.on_position_protected(pos)
+    advisor.on_event(pos, _protected_event(_T0))
+    event2 = _protected_event(_T0 + timedelta(minutes=4))
+    response = advisor.on_event(pos, event2)
+    assert response.is_actionable
+    assert response.recommendation is not None
+    assert response.recommendation.action == "exit_full"
+
+
+def test_hold_floor_zero_disables_suppression() -> None:
+    """min_hold_minutes_for_full_exit=0.0 disables the floor entirely."""
+    llm = _FakeLLMClient(queued=[_success(action="exit_full")])
+    advisor = _make_advisor(llm, min_hold_minutes_for_full_exit=0.0)
+    pos = _FakePosition()
+    advisor.on_position_protected(pos)
+    # Even at t=0 the recommendation should pass through.
+    event = _protected_event(_T0)
+    response = advisor.on_event(pos, event)
+    assert response.is_actionable
+
+
+def test_hold_recommendation_not_affected_by_floor() -> None:
+    """hold recommendations are never suppressed, floor doesn't apply."""
+    llm = _FakeLLMClient(queued=[_success(action="hold")])
+    advisor = _make_advisor(llm, min_hold_minutes_for_full_exit=3.0)
+    pos = _FakePosition()
+    advisor.on_position_protected(pos)
+    event = _protected_event(_T0 + timedelta(seconds=30))
+    response = advisor.on_event(pos, event)
+    assert response.is_held
+    assert not response.is_actionable

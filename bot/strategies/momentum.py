@@ -14,6 +14,7 @@ from typing import cast
 import pandas as pd
 import structlog
 
+from bot.config import EntryQualityConfig
 from bot.indicators import evaluate_extension, evaluate_hod, is_bull_flag, vwap
 from bot.strategies.base import (
     _PMH_CAP_TICK,
@@ -21,6 +22,13 @@ from bot.strategies.base import (
     Strategy,
     _apply_premarket_high_cap,
     _apply_stop_distance_floor,
+)
+from bot.strategies.entry_quality import (
+    check_consolidation_tightness,
+    check_halt_detection,
+    check_impulse_strength,
+    check_volume_contraction,
+    check_vwap_extension,
 )
 from bot.strategies.volume import check_recent_window_rvol
 
@@ -64,6 +72,7 @@ class MomentumStrategy(Strategy):
         catalyst_required: bool = False,
         recent_rvol_min: float = 2.0,
         recent_rvol_window_bars: int = 20,
+        entry_quality: EntryQualityConfig | None = None,
     ) -> None:
         """Store pullback envelope, scale-out R-multiple, extension config, window end.
 
@@ -108,6 +117,10 @@ class MomentumStrategy(Strategy):
         # Phase 12.4: moment-of-entry breakout-bar volume validation.
         self.recent_rvol_min = recent_rvol_min
         self.recent_rvol_window_bars = recent_rvol_window_bars
+        # Phase 13: entry-quality gates supplementing is_bull_flag + recent-RVOL.
+        # ``None`` resolves to defaults (all gates enabled with calibrated
+        # thresholds from the 2026-05-08 forensic).
+        self.entry_quality = entry_quality if entry_quality is not None else EntryQualityConfig()
 
     def evaluate(self, symbol: str, bars: pd.DataFrame) -> Signal | None:
         """Emit a Signal if the latest bar breaks HOD out of a bull flag."""
@@ -288,6 +301,21 @@ class MomentumStrategy(Strategy):
         if suppression is not None:
             return None
 
+        # Phase 13: entry-quality gates from 2026-05-08 momentum forensic
+        # (AEHL/TRAW/AIIO). Each gate is independently enable/disable
+        # controlled and emits a distinct rejection event. Order is
+        # cheapest-first: halt is timestamp arithmetic, VWAP requires
+        # session-anchored cumulative-volume computation.
+        if _apply_entry_quality_gates(
+            cfg=self.entry_quality,
+            bars=bars,
+            candidate_price=entry,
+            symbol=symbol,
+            strategy=self.name,
+            bar_time=last_ts,
+        ):
+            return None
+
         # Phase 7.1: observability — see gap_and_go for rationale. Emitted so
         # an operator can correlate the strategy's stop reference with any
         # downstream stop_too_wide rejection in the risk engine.
@@ -357,3 +385,72 @@ def _prior_bar_close(bars: pd.DataFrame) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _apply_entry_quality_gates(
+    *,
+    cfg: EntryQualityConfig,
+    bars: pd.DataFrame,
+    candidate_price: float,
+    symbol: str,
+    strategy: str,
+    bar_time: pd.Timestamp,
+) -> bool:
+    """Phase 13 — run enabled entry-quality gates; return True iff any rejected.
+
+    Cheapest-first ordering: halt → impulse → consolidation → volume
+    contraction → VWAP extension. First rejecting gate short-circuits;
+    only one rejection event fires per signal evaluation. Disabled
+    gates are skipped silently.
+    """
+    if cfg.halt_detection_enabled and check_halt_detection(
+        bars=bars,
+        max_bar_gap_minutes=cfg.max_bar_gap_minutes,
+        rth_only=cfg.halt_detection_rth_only,
+        symbol=symbol,
+        strategy=strategy,
+        bar_time=bar_time,
+    ):
+        return True
+    if cfg.impulse_strength_enabled and check_impulse_strength(
+        bars=bars,
+        impulse_window_bars=cfg.impulse_window_bars,
+        consolidation_window_bars=cfg.consolidation_window_bars,
+        impulse_min_pct_move=cfg.impulse_min_pct_move,
+        impulse_min_slope_ratio=cfg.impulse_min_slope_ratio,
+        symbol=symbol,
+        strategy=strategy,
+        bar_time=bar_time,
+    ):
+        return True
+    if cfg.consolidation_tightness_enabled and check_consolidation_tightness(
+        bars=bars,
+        impulse_window_bars=cfg.impulse_window_bars,
+        consolidation_window_bars=cfg.consolidation_window_bars,
+        consolidation_max_range_pct=cfg.consolidation_max_range_pct,
+        symbol=symbol,
+        strategy=strategy,
+        bar_time=bar_time,
+    ):
+        return True
+    if cfg.volume_contraction_enabled and check_volume_contraction(
+        bars=bars,
+        impulse_window_bars=cfg.impulse_window_bars,
+        consolidation_window_bars=cfg.consolidation_window_bars,
+        max_consolidation_to_impulse_volume_ratio=cfg.max_consolidation_to_impulse_volume_ratio,
+        symbol=symbol,
+        strategy=strategy,
+        bar_time=bar_time,
+    ):
+        return True
+    return bool(
+        cfg.vwap_extension_enabled
+        and check_vwap_extension(
+            bars=bars,
+            candidate_price=candidate_price,
+            max_extension_above_vwap_pct=cfg.max_extension_above_vwap_pct,
+            symbol=symbol,
+            strategy=strategy,
+            bar_time=bar_time,
+        )
+    )

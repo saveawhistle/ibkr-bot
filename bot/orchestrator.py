@@ -241,6 +241,7 @@ def build_default_strategies(settings: Settings | None = None) -> list[Strategy]
                 catalyst_required=gng_cfg.catalyst_required,
                 recent_rvol_min=gng_cfg.recent_rvol_min,
                 recent_rvol_window_bars=gng_cfg.recent_rvol_window_bars,
+                entry_quality=gng_cfg.entry_quality,
             )
         )
     if s.strategies.momentum.enabled:
@@ -260,6 +261,7 @@ def build_default_strategies(settings: Settings | None = None) -> list[Strategy]
                 catalyst_required=mom_cfg.catalyst_required,
                 recent_rvol_min=mom_cfg.recent_rvol_min,
                 recent_rvol_window_bars=mom_cfg.recent_rvol_window_bars,
+                entry_quality=mom_cfg.entry_quality,
             )
         )
     return strategies

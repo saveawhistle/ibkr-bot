@@ -85,6 +85,43 @@ def _pin_legacy_momentum_window_start(
     monkeypatch.setattr(_mom_module, "_DEFAULT_WINDOW_START", _time(9, 30))
 
 
+@pytest.fixture(autouse=True)
+def _disable_entry_quality_gates_by_default(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 13: default-disable the entry-quality gates for legacy strategy tests.
+
+    The five new gates (halt detection, impulse strength, consolidation
+    tightness, volume contraction, VWAP extension) require structurally
+    realistic bar fixtures (>=10 bars with proper impulse + consolidation
+    shape, real volume signature, and in-line VWAP). Legacy strategy and
+    orchestrator tests build small synthetic frames that wouldn't satisfy
+    those constraints; default-disable the gates so those tests continue
+    to assert their original invariants.
+
+    Tests that DO want to exercise the gates opt in via the
+    ``@pytest.mark.entry_quality_enabled`` marker. The Phase 13 unit and
+    integration tests live in ``test_entry_quality.py`` and use the
+    marker explicitly.
+    """
+    if request.node.get_closest_marker("entry_quality_enabled"):
+        return
+
+    def _noop(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("bot.strategies.gap_and_go.check_halt_detection", _noop)
+    monkeypatch.setattr("bot.strategies.gap_and_go.check_impulse_strength", _noop)
+    monkeypatch.setattr("bot.strategies.gap_and_go.check_consolidation_tightness", _noop)
+    monkeypatch.setattr("bot.strategies.gap_and_go.check_volume_contraction", _noop)
+    monkeypatch.setattr("bot.strategies.gap_and_go.check_vwap_extension", _noop)
+    monkeypatch.setattr("bot.strategies.momentum.check_halt_detection", _noop)
+    monkeypatch.setattr("bot.strategies.momentum.check_impulse_strength", _noop)
+    monkeypatch.setattr("bot.strategies.momentum.check_consolidation_tightness", _noop)
+    monkeypatch.setattr("bot.strategies.momentum.check_volume_contraction", _noop)
+    monkeypatch.setattr("bot.strategies.momentum.check_vwap_extension", _noop)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers so ``--strict-markers`` runs stay clean."""
     config.addinivalue_line(
@@ -97,4 +134,9 @@ def pytest_configure(config: pytest.Config) -> None:
         "momentum_default_window_start: Phase 12.6 -- exercise the production "
         "10:00 default for momentum.window_start (autouse fixture pins back "
         "to 09:30 for legacy compat otherwise).",
+    )
+    config.addinivalue_line(
+        "markers",
+        "entry_quality_enabled: Phase 13 -- exercise the entry-quality gates "
+        "(default-disabled by conftest autouse fixture for legacy tests).",
     )
