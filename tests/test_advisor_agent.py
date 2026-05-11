@@ -72,6 +72,7 @@ def _make_advisor(
     self_disable_failure_rate: float = 0.5,
     notify_callback: Callable[[str], None] | None = None,
     min_hold_minutes_for_full_exit: float = 0.0,
+    min_r_for_full_exit: float = 0.0,
 ) -> ExitAdvisor:
     cost_tracker = CostTracker(soft_cap_usd=soft_cap, hard_cap_usd=hard_cap)
     return ExitAdvisor(
@@ -84,6 +85,7 @@ def _make_advisor(
         self_disable_min_calls=self_disable_min_calls,
         notify_callback=notify_callback,
         min_hold_minutes_for_full_exit=min_hold_minutes_for_full_exit,
+        min_r_for_full_exit=min_r_for_full_exit,
     )
 
 
@@ -448,3 +450,74 @@ def test_hold_recommendation_not_affected_by_floor() -> None:
     response = advisor.on_event(pos, event)
     assert response.is_held
     assert not response.is_actionable
+
+
+# ============================================================
+# min_r_for_full_exit tests
+# ============================================================
+
+
+def test_low_peak_r_exit_full_suppressed() -> None:
+    """exit_full is suppressed when peak R has not reached the threshold."""
+    # _FakePosition: entry=1.0, stop=0.9 → 1R = 0.10
+    # Bar high=1.08 → peak_r = (1.08-1.0)/0.10 = 0.8  <  threshold=1.0 → suppressed
+    llm = _FakeLLMClient(queued=[_success(action="hold"), _success(action="exit_full")])
+    advisor = _make_advisor(llm, min_r_for_full_exit=1.0)
+    pos = _FakePosition()
+    advisor.on_position_protected(pos)
+    # Drive a bar that sets peak_price=1.08 (0.8R)
+    advisor.on_event(pos, _bar(_T0, high=1.08, close=1.05))
+    # Trigger: LLM recommends exit_full; peak_r=0.8 < 1.0 → should be suppressed
+    event = _protected_event(_T0 + timedelta(seconds=60))
+    response = advisor.on_event(pos, event)
+    assert not response.is_actionable
+    assert response.is_held
+    assert "peak_r" in response.reasoning
+    assert "suppressed" in response.reasoning
+
+
+def test_exit_full_allowed_when_peak_r_meets_threshold() -> None:
+    """exit_full passes through when peak R has reached the threshold."""
+    # Bar high=1.12 → peak_r = (1.12-1.0)/0.10 = 1.2 >= 1.0 → allowed
+    llm = _FakeLLMClient(queued=[_success(action="hold"), _success(action="exit_full")])
+    advisor = _make_advisor(llm, min_r_for_full_exit=1.0)
+    pos = _FakePosition()
+    advisor.on_position_protected(pos)
+    advisor.on_event(pos, _bar(_T0, high=1.12, close=1.10))
+    event = _protected_event(_T0 + timedelta(seconds=60))
+    response = advisor.on_event(pos, event)
+    assert response.is_actionable
+    assert response.recommendation is not None
+    assert response.recommendation.action == "exit_full"
+
+
+def test_min_r_zero_disables_suppression() -> None:
+    """min_r_for_full_exit=0.0 disables the R floor entirely (default off)."""
+    # Even with peak_r=0 the recommendation passes through.
+    llm = _FakeLLMClient(queued=[_success(action="exit_full")])
+    advisor = _make_advisor(llm, min_r_for_full_exit=0.0)
+    pos = _FakePosition()
+    advisor.on_position_protected(pos)
+    event = _protected_event(_T0)
+    response = advisor.on_event(pos, event)
+    assert response.is_actionable
+
+
+def test_non_exit_full_not_affected_by_min_r() -> None:
+    """exit_partial is never blocked by the R floor (only exit_full is gated)."""
+    partial_result = LLMCallResult(
+        success=True,
+        recommendation=ExitRecommendation(action="exit_partial", partial_pct=0.5, confidence=0.7, reason="r"),  # type: ignore[arg-type]
+        cost_usd=0.01,
+        duration_seconds=0.1,
+    )
+    llm = _FakeLLMClient(queued=[partial_result])
+    advisor = _make_advisor(llm, min_r_for_full_exit=1.0)
+    pos = _FakePosition()
+    advisor.on_position_protected(pos)
+    # peak_r stays at 0 (no bar event) — floor is active, but action != exit_full
+    event = _protected_event(_T0)
+    response = advisor.on_event(pos, event)
+    assert response.is_actionable
+    assert response.recommendation is not None
+    assert response.recommendation.action == "exit_partial"

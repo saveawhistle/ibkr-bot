@@ -203,6 +203,7 @@ class ExitAdvisor:
         self_disable_min_calls: int = SELF_DISABLE_MIN_CALLS,
         notify_callback: Any = None,
         min_hold_minutes_for_full_exit: float = 0.0,
+        min_r_for_full_exit: float = 0.0,
     ) -> None:
         self._llm_client = llm_client
         self._cost_tracker = cost_tracker
@@ -213,6 +214,7 @@ class ExitAdvisor:
         self._self_disable_min_calls = self_disable_min_calls
         self._notify_callback = notify_callback
         self._min_hold_seconds_for_full_exit = min_hold_minutes_for_full_exit * 60.0
+        self._min_r_for_full_exit = min_r_for_full_exit
         self._self_disabled = False
         self._contexts: dict[str, _PerTradeContext] = {}
 
@@ -398,6 +400,41 @@ class ExitAdvisor:
                     reasoning=(
                         f"exit_full suppressed: {round(time_in_trade)}s elapsed, "
                         f"floor is {int(self._min_hold_seconds_for_full_exit)}s. "
+                        f"LLM reasoning: {recommendation.reason}"
+                    ),
+                )
+
+        # Peak-R floor: suppress exit_full when the trade's peak R-multiple has
+        # never reached the configured threshold. Below that level the mechanical
+        # stop is the correct exit; advisor-driven exits capture noise, not signal.
+        if (
+            recommendation.action == "exit_full"
+            and self._min_r_for_full_exit > 0.0
+        ):
+            risk = ctx.trade_state.entry_price - ctx.trade_state.initial_stop
+            peak_r = (
+                (ctx.trade_state.peak_price - ctx.trade_state.entry_price) / risk
+                if risk > 0.0
+                else 0.0
+            )
+            if peak_r < self._min_r_for_full_exit:
+                ctx.counters.held_calls += 1
+                _log.info(
+                    "advisor.low_r_exit_suppressed",
+                    symbol=position.symbol,
+                    event_type=type(event).__name__,
+                    peak_r=round(peak_r, 3),
+                    min_r_threshold=self._min_r_for_full_exit,
+                    llm_action=recommendation.action,
+                    llm_reasoning=recommendation.reason,
+                    cost_usd=round(result.cost_usd, 6),
+                )
+                return AdvisorResponse(
+                    recommendation=None,
+                    evaluation_performed=True,
+                    reasoning=(
+                        f"exit_full suppressed: peak_r={peak_r:.3f} < "
+                        f"threshold={self._min_r_for_full_exit}. "
                         f"LLM reasoning: {recommendation.reason}"
                     ),
                 )

@@ -80,6 +80,13 @@ looks weak," don't recommend "hold" — pick an action consistent with the analy
 often look weak before the breakout extends. The mechanical stop handles catastrophic \
 early failure. Within the first 3 minutes, recommend `hold` unless a drawdown event \
 has already signaled structural failure of the trade.
+- Do not recommend `exit_full` solely because the trade has not yet reached 1R gain \
+(peak_r_multiple < 1.0). Below 1R the mechanical stop is the correct exit — it is set \
+at the right level and does not need your help. A trade stalling below 1R is normal for \
+momentum breakouts; the stop manages failure, you manage the runner after scale-out. \
+Only recommend `exit_full` when there is a genuine structural reason (distribution, \
+volume reversal, catalyst failure) — not simply because the trade is slow or has not \
+reached its scale-out target.
 
 # Input format
 
