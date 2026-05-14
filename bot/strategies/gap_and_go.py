@@ -16,7 +16,7 @@ import pandas as pd
 import structlog
 
 from bot.config import EntryQualityConfig
-from bot.indicators import atr, evaluate_extension, evaluate_hod, vwap
+from bot.indicators import atr, evaluate_extension, premarket_high, vwap
 from bot.strategies.base import (
     _PMH_CAP_TICK,
     Signal,
@@ -215,48 +215,88 @@ class GapAndGoStrategy(Strategy):
                     extension_ratio=check.extension_ratio,
                 )
 
-        # Phase 7.2: HOD check resets at 09:30 ET (premarket wicks no longer
-        # contaminate the market-hours running max). Phase 9.1: ``by="close"``
-        # so a wick-and-retrace bar (high above HOD, close back below) is
-        # correctly rejected as a failed breakout — RMAX 2026-04-27 09:34
-        # entered on exactly that pattern. ``hod.last_high`` / ``session_hod``
-        # remain high-based so the rejection event shows both the wick that
-        # made HOD and the close that failed to confirm.
-        hod = evaluate_hod(bars, by="close")
-        if hod is None or not hod.is_new_hod:
+        # Two-mode entry trigger — Ross Cameron Gap-and-Go:
+        # · First RTH bar (09:30): trigger = PMH only.
+        #   Scenario B — stock opens below PMH; the buy-stop fires when PMH
+        #   is crossed within the first minute. The first candle's own high
+        #   is not yet a completed reference level.
+        # · Subsequent bars: trigger = max(PMH, first_candle_high).
+        #   Scenario A — stock opens above PMH; the opening range high is the
+        #   resistance to beat, not just PMH.
+        #   Scenario B — first_candle_high ≤ PMH so max() resolves to PMH.
+        # A wick above the trigger that closes below it (RMAX pattern) is
+        # correctly rejected because the close test fails. Permissive when
+        # neither level is available (mid-session subscription).
+        pmh = premarket_high(bars)
+        first_rth_high = _first_rth_bar_high(bars)
+        is_first_bar = _is_first_rth_bar(bars)
+        if is_first_bar:
+            trigger = pmh
+        else:
+            candidates = [v for v in (pmh, first_rth_high) if v is not None]
+            trigger = max(candidates) if candidates else None
+
+        # Standing STP_LMT path: on the first RTH bar, if price hasn't broken
+        # the trigger yet, place a resting buy-stop at the trigger rather than
+        # rejecting. IBKR holds the order on its servers and fills intrabar
+        # when price crosses the level during 09:31 – window_end. Entry is
+        # anchored at the trigger (PMH); stop is the first candle's low.
+        # On subsequent bars and when the first bar already closed above the
+        # trigger, we fall through to the normal stop-calculation path below.
+        standing_order = is_first_bar and trigger is not None and last_close <= trigger
+
+        if not standing_order and trigger is not None and last_close <= trigger:
             return self._reject(
                 symbol,
                 last_ts,
                 "entry_trigger",
-                "not_new_hod",
-                last_high=hod.last_high if hod else None,
+                "not_above_trigger",
                 last_close=last_close,
-                session_hod=hod.session_hod if hod else None,
-                bars_in_session=hod.bars_in_session if hod else 0,
+                premarket_high=pmh,
+                first_rth_bar_high=first_rth_high,
+                trigger_level=trigger,
             )
 
-        # Phase 7.1: restrict stop reference to market-hours bars (>= 09:30 ET on
-        # the bar's local date). IBKR backfills premarket bars with the same
-        # calendar date, so the previous same-date filter leaked overnight wicks
-        # into the pullback reference; a 1 AM $7.87 print polluted TZOO's stop
-        # across the entire session on Day 4. `last_ts` is tz-aware NY-local.
-        last_date = last_ts.date()
-        index = cast("pd.DatetimeIndex", bars.index)
-        market_open = pd.Timestamp(datetime.combine(last_date, time(9, 30)))
-        if index.tz is not None:
-            market_open = market_open.tz_localize(index.tz)
-        session = bars.loc[bars.index >= market_open]
-        if session.empty:
-            return self._reject(symbol, last_ts, "stop_calculation", "no_market_hours_bars")
-        # Phase 7.1: pullback reference is the recent N-bar minimum, not the
-        # session minimum — session-min accumulated the worst wick of the day
-        # and permanently widened the stop. If fewer than N bars are available
-        # (e.g. 9:31 evaluation with 1 completed bar), use whatever we have.
-        recent_bars = session.iloc[-PULLBACK_LOOKBACK_BARS:]
-        bars_available_for_lookback = len(recent_bars)
-        pullback_low = float(recent_bars["low"].min())
-        stop = float(min(last_vwap, pullback_low))
-        entry = last_close
+        # ---- Entry / stop determination ----
+        # Standing order: entry = trigger (STP_LMT trigger level), stop = first
+        # candle low. Normal order: entry = bar close, stop = min(VWAP, pullback).
+        pullback_low: float
+        bars_available_for_lookback: int
+        pullback_lookback_bars_used: int
+
+        if standing_order:
+            assert trigger is not None  # guarded by standing_order condition
+            entry = trigger
+            first_candle_low = float(bars["low"].iloc[-1])
+            stop = first_candle_low
+            pullback_low = first_candle_low
+            pullback_lookback_bars_used = 1
+            bars_available_for_lookback = 1
+        else:
+            entry = last_close
+            # Phase 7.1: restrict stop reference to market-hours bars (>= 09:30 ET
+            # on the bar's local date). IBKR backfills premarket bars with the same
+            # calendar date, so the previous same-date filter leaked overnight wicks
+            # into the pullback reference; a 1 AM $7.87 print polluted TZOO's stop
+            # across the entire session on Day 4. `last_ts` is tz-aware NY-local.
+            last_date = last_ts.date()
+            index = cast("pd.DatetimeIndex", bars.index)
+            market_open = pd.Timestamp(datetime.combine(last_date, time(9, 30)))
+            if index.tz is not None:
+                market_open = market_open.tz_localize(index.tz)
+            session = bars.loc[bars.index >= market_open]
+            if session.empty:
+                return self._reject(symbol, last_ts, "stop_calculation", "no_market_hours_bars")
+            # Phase 7.1: pullback reference is the recent N-bar minimum, not the
+            # session minimum — session-min accumulated the worst wick of the day
+            # and permanently widened the stop. If fewer than N bars are available
+            # (e.g. 9:31 evaluation with 1 completed bar), use whatever we have.
+            recent_bars = session.iloc[-PULLBACK_LOOKBACK_BARS:]
+            bars_available_for_lookback = len(recent_bars)
+            pullback_lookback_bars_used = PULLBACK_LOOKBACK_BARS
+            pullback_low = float(recent_bars["low"].min())
+            stop = float(min(last_vwap, pullback_low))
+
         risk = entry - stop
         if risk <= 0:
             return self._reject(
@@ -267,7 +307,7 @@ class GapAndGoStrategy(Strategy):
                 entry=entry,
                 stop=stop,
                 pullback_low=pullback_low,
-                pullback_lookback_bars=PULLBACK_LOOKBACK_BARS,
+                pullback_lookback_bars=pullback_lookback_bars_used,
                 bars_available_for_lookback=bars_available_for_lookback,
                 vwap_at_entry=last_vwap,
             )
@@ -296,7 +336,9 @@ class GapAndGoStrategy(Strategy):
             enabled=self.premarket_high_cap_enabled,
         )
 
-        reasons = ["vwap_hold", "new_hod"]
+        reasons = ["vwap_hold", "above_pmh"]
+        if standing_order:
+            reasons.append("standing_stp_lmt")
         if scale_out_cap_reason == "premarket_high":
             reasons.append("scale_out_capped_premarket_high")
             _log.info(
@@ -349,9 +391,10 @@ class GapAndGoStrategy(Strategy):
             entry=entry,
             stop=stop,
             pullback_low=pullback_low,
-            pullback_lookback_bars=PULLBACK_LOOKBACK_BARS,
+            pullback_lookback_bars=pullback_lookback_bars_used,
             bars_available_for_lookback=bars_available_for_lookback,
             vwap_at_entry=last_vwap,
+            standing_order=standing_order,
         )
         return Signal(
             symbol=symbol,
@@ -364,7 +407,7 @@ class GapAndGoStrategy(Strategy):
             reasons=reasons,
             recent_bar_volume=_recent_volume(bars),
             pullback_low=pullback_low,
-            pullback_lookback_bars=PULLBACK_LOOKBACK_BARS,
+            pullback_lookback_bars=pullback_lookback_bars_used,
             bars_available_for_lookback=bars_available_for_lookback,
             vwap_at_entry=last_vwap,
             # Phase 12.5: prior bar close is the most recent fully-quoted
@@ -372,6 +415,9 @@ class GapAndGoStrategy(Strategy):
             # ceiling anchors on ``min(entry, this)`` to avoid Error 202
             # on bars where the breakout close sits well above market.
             market_anchor_price=_prior_bar_close(bars),
+            # Standing STP_LMT order: executor places a resting buy-stop at
+            # the trigger level regardless of the global entry_order_type.
+            preferred_order_type="STP_LMT" if standing_order else None,
         )
 
     def _minutes_since_open(self, ts: pd.Timestamp) -> int:
@@ -421,6 +467,34 @@ def _prior_bar_close(bars: pd.DataFrame) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _first_rth_bar_high(bars: pd.DataFrame) -> float | None:
+    """High of the first RTH (09:30 ET) bar on the session date, or None if absent."""
+    if bars.empty or "high" not in bars.columns:
+        return None
+    index = cast("pd.DatetimeIndex", bars.index)
+    if not isinstance(index, pd.DatetimeIndex):
+        return None
+    local = index.tz_convert("America/New_York") if index.tz is not None else index
+    last_date = local[-1].date()
+    mask = (local.date == last_date) & (local.time >= _WINDOW_START)
+    if not mask.any():
+        return None
+    return float(bars.loc[mask, "high"].iloc[0])
+
+
+def _is_first_rth_bar(bars: pd.DataFrame) -> bool:
+    """True when the latest bar is the first (and only) RTH bar on its session date."""
+    if bars.empty:
+        return False
+    index = cast("pd.DatetimeIndex", bars.index)
+    if not isinstance(index, pd.DatetimeIndex):
+        return False
+    local = index.tz_convert("America/New_York") if index.tz is not None else index
+    last_date = local[-1].date()
+    rth_count = int(((local.date == last_date) & (local.time >= _WINDOW_START)).sum())
+    return rth_count <= 1
 
 
 def _apply_entry_quality_gates(

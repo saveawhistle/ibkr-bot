@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1382,8 +1383,13 @@ async def test_multiple_commission_reports_accumulate(tmp_path: Path) -> None:
 # or a later bar (MUST cancel iff zero fills exist).
 
 
-_BAR_T = datetime(2026, 4, 22, 9, 41, tzinfo=UTC)
-_BAR_T_PLUS_1 = _BAR_T + timedelta(minutes=1)
+# Gap-and-go STP_LMT standing orders live until 10:00 ET (window_end) rather
+# than expiring after one bar. _BAR_T sits inside the 09:30–10:00 window;
+# _BAR_T_PLUS_1 is at 10:01 ET — just past window_end — so expire tests that
+# expect cancellation use a timestamp that actually crosses the boundary.
+_NY = ZoneInfo("America/New_York")
+_BAR_T = datetime(2026, 4, 22, 9, 41, tzinfo=_NY)
+_BAR_T_PLUS_1 = datetime(2026, 4, 22, 10, 1, tzinfo=_NY)
 
 
 def _signal_at(bar_ts: datetime, *, symbol: str = "TEST") -> Signal:

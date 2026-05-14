@@ -99,7 +99,7 @@ session:
 universe:
   price_min: 1.0
   price_max: 20.0
-  float_max: 20_000_000
+  float_max: 50_000_000
   gap_pct_min: 10.0
   rvol_min: 5.0
   premarket_vol_min: 300_000
