@@ -16,7 +16,7 @@ import pandas as pd
 import structlog
 
 from bot.config import EntryQualityConfig
-from bot.indicators import atr, evaluate_extension, evaluate_hod, vwap
+from bot.indicators import atr, evaluate_extension, premarket_high, vwap
 from bot.strategies.base import (
     _PMH_CAP_TICK,
     Signal,
@@ -215,24 +215,20 @@ class GapAndGoStrategy(Strategy):
                     extension_ratio=check.extension_ratio,
                 )
 
-        # Phase 7.2: HOD check resets at 09:30 ET (premarket wicks no longer
-        # contaminate the market-hours running max). Phase 9.1: ``by="close"``
-        # so a wick-and-retrace bar (high above HOD, close back below) is
-        # correctly rejected as a failed breakout — RMAX 2026-04-27 09:34
-        # entered on exactly that pattern. ``hod.last_high`` / ``session_hod``
-        # remain high-based so the rejection event shows both the wick that
-        # made HOD and the close that failed to confirm.
-        hod = evaluate_hod(bars, by="close")
-        if hod is None or not hod.is_new_hod:
+        # PMH trigger: gap-and-go fires when the close breaks the premarket
+        # high — a fixed resistance level from before the RTH open. A wick
+        # above PMH that closes back below (RMAX 2026-04-27 pattern) is
+        # correctly rejected because the close test fails. When no premarket
+        # bars are present the check is permissive rather than blocking.
+        pmh = premarket_high(bars)
+        if pmh is not None and last_close <= pmh:
             return self._reject(
                 symbol,
                 last_ts,
                 "entry_trigger",
-                "not_new_hod",
-                last_high=hod.last_high if hod else None,
+                "not_above_pmh",
                 last_close=last_close,
-                session_hod=hod.session_hod if hod else None,
-                bars_in_session=hod.bars_in_session if hod else 0,
+                premarket_high=pmh,
             )
 
         # Phase 7.1: restrict stop reference to market-hours bars (>= 09:30 ET on
@@ -296,7 +292,7 @@ class GapAndGoStrategy(Strategy):
             enabled=self.premarket_high_cap_enabled,
         )
 
-        reasons = ["vwap_hold", "new_hod"]
+        reasons = ["vwap_hold", "above_pmh"]
         if scale_out_cap_reason == "premarket_high":
             reasons.append("scale_out_capped_premarket_high")
             _log.info(
