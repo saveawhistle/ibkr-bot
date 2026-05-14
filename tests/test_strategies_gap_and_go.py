@@ -504,7 +504,7 @@ def test_pmh_cap_binds_when_pmh_between_entry_and_2r() -> None:
 
     Pre-PMH-trigger this scenario emitted a signal and capped scale-out at
     PMH − $0.01.  With the trigger, close $10.70 < PMH $11.00 → rejected as
-    not_above_pmh before the scale-out calculation is reached.
+    not_above_trigger before the scale-out calculation is reached.
     """
     bars = _frame_with_premarket_high(pmh=11.00)
     strategy = GapAndGoStrategy()
@@ -514,7 +514,7 @@ def test_pmh_cap_binds_when_pmh_between_entry_and_2r() -> None:
     rejections = [
         e
         for e in captured
-        if e.get("event") == "signal.rejected" and e.get("reason") == "not_above_pmh"
+        if e.get("event") == "signal.rejected" and e.get("reason") == "not_above_trigger"
     ]
     assert len(rejections) == 1
     assert rejections[0]["premarket_high"] == pytest.approx(11.00)
@@ -533,7 +533,7 @@ def test_pmh_cap_does_not_bind_when_entry_above_pmh() -> None:
 
 
 def test_pmh_cap_does_not_bind_when_pmh_above_2r() -> None:
-    """PMH far above entry (PMH $20, close $10.70) → rejected as not_above_pmh.
+    """PMH far above entry (PMH $20, close $10.70) → rejected as not_above_trigger.
 
     Pre-PMH-trigger the cap didn't bind and 2R applied.  Under the trigger the
     signal never fires: close $10.70 is nowhere near breaking PMH $20.00.
@@ -580,11 +580,10 @@ def test_pmh_cap_no_premarket_bars_falls_back_to_2r() -> None:
 
 
 def test_pmh_cap_logs_when_binding() -> None:
-    """``not_above_pmh`` rejection carries premarket_high and last_close fields.
+    """``not_above_trigger`` rejection carries pmh, first_rth_bar_high, and trigger_level.
 
     Pre-PMH-trigger this verified ``strategy.scale_out_capped_premarket_high``.
-    The scale-out cap cannot bind while the trigger requires close > PMH;
-    the observable outcome for close < PMH is the rejection event with both
+    The observable outcome for close < trigger is the rejection event with all
     reference values surfaced for forensic review.
     """
     bars = _frame_with_premarket_high(pmh=11.00)
@@ -593,7 +592,7 @@ def test_pmh_cap_logs_when_binding() -> None:
         signal = strategy.evaluate("TEST", bars)
     assert signal is None
     rejections = [
-        e for e in captured if e.get("event") == "signal.rejected" and e.get("reason") == "not_above_pmh"
+        e for e in captured if e.get("event") == "signal.rejected" and e.get("reason") == "not_above_trigger"
     ]
     assert len(rejections) == 1
     evt = rejections[0]
@@ -601,6 +600,7 @@ def test_pmh_cap_logs_when_binding() -> None:
     assert evt["strategy"] == "gap_and_go"
     assert evt["premarket_high"] == pytest.approx(11.00)
     assert evt["last_close"] == pytest.approx(10.7)
+    assert evt["trigger_level"] == pytest.approx(11.00)  # max(PMH=11, first_candle_high=10) = 11
 
 
 # ---------- Phase 9.1: close-based HOD confirmation ---------- #
@@ -611,8 +611,7 @@ def test_rejects_wick_and_retrace_breakout() -> None:
 
     Same pattern as RMAX 2026-04-27 09:34.  Premarket high is $10.20.  The
     trigger bar wicks to $10.30 (above PMH) but closes $10.05 — still above
-    VWAP but below PMH.  The PMH trigger correctly blocks this failed breakout:
-    close $10.05 ≤ PMH $10.20.
+    VWAP but below the trigger level $10.20.
     """
     bars = _frame(
         times=[
@@ -635,12 +634,13 @@ def test_rejects_wick_and_retrace_breakout() -> None:
     rejections = [
         e
         for e in captured
-        if e.get("event") == "signal.rejected" and e.get("reason") == "not_above_pmh"
+        if e.get("event") == "signal.rejected" and e.get("reason") == "not_above_trigger"
     ]
     assert len(rejections) == 1
     evt = rejections[0]
     assert evt["premarket_high"] == pytest.approx(10.20)
     assert evt["last_close"] == pytest.approx(10.05)
+    assert evt["trigger_level"] == pytest.approx(10.20)  # max(PMH=10.20, first_candle_high=9.55)
 
 
 def test_accepts_close_confirmed_breakout() -> None:
@@ -660,3 +660,83 @@ def test_accepts_close_confirmed_breakout() -> None:
     signal = strategy.evaluate("TEST", bars)
     assert signal is not None
     assert signal.entry == pytest.approx(10.45)
+
+
+# ---------- Two-mode PMH trigger (Scenario A / Scenario B) ---------- #
+
+
+def test_scenario_b_first_bar_fires_on_pmh_break() -> None:
+    """Scenario B: first 1-min bar closes above PMH → entry fires on the 09:30 bar.
+
+    Stock opens below PMH.  The 09:30 bar rallies through PMH within the
+    first minute and closes above it.  On the first RTH bar the trigger is
+    PMH only (first_candle_high not yet a completed reference), so the
+    close $10.30 > PMH $10.20 is valid.
+    """
+    bars = _frame(
+        times=[
+            "2026-04-16 06:00",  # premarket
+            "2026-04-16 07:00",  # premarket — sets PMH = $10.20
+            "2026-04-16 09:30",  # first RTH bar, closes above PMH
+        ],
+        highs=[9.50, 10.20, 10.50],
+        lows=[9.30, 10.00, 10.10],
+        closes=[9.40, 10.10, 10.30],
+        volumes=[300, 500, 2000],
+    )
+    strategy = GapAndGoStrategy()
+    signal = strategy.evaluate("TEST", bars)
+    assert signal is not None
+    assert signal.entry == pytest.approx(10.30)
+
+
+def test_scenario_a_subsequent_bar_trigger_is_first_candle_high() -> None:
+    """Scenario A: stock opens above PMH; subsequent bars need close > first candle high.
+
+    PMH = $10.00.  First candle (09:30) runs to high $11.00 (above PMH),
+    closes $10.80.  The 09:31 bar closes $10.95 — above PMH but below first
+    candle high $11.00 → rejected as not_above_trigger.
+    """
+    bars = _frame(
+        times=[
+            "2026-04-16 07:00",  # premarket — PMH = $10.00
+            "2026-04-16 09:30",  # first candle high $11.00, closes $10.80
+            "2026-04-16 09:31",  # closes $10.95 — above PMH, below first candle high
+        ],
+        highs=[10.00, 11.00, 11.00],
+        lows=[9.80, 10.50, 10.70],
+        closes=[9.90, 10.80, 10.95],
+        volumes=[500, 2000, 1500],
+    )
+    strategy = GapAndGoStrategy()
+    with capture_logs() as captured:
+        signal = strategy.evaluate("TEST", bars)
+    assert signal is None
+    rejections = [
+        e for e in captured
+        if e.get("event") == "signal.rejected" and e.get("reason") == "not_above_trigger"
+    ]
+    assert len(rejections) == 1
+    evt = rejections[0]
+    assert evt["trigger_level"] == pytest.approx(11.00)   # max(PMH=10, first_candle=11)
+    assert evt["premarket_high"] == pytest.approx(10.00)
+    assert evt["first_rth_bar_high"] == pytest.approx(11.00)
+
+
+def test_scenario_a_entry_fires_when_close_exceeds_first_candle_high() -> None:
+    """Scenario A: close above first candle high triggers entry."""
+    bars = _frame(
+        times=[
+            "2026-04-16 07:00",  # premarket — PMH = $10.00
+            "2026-04-16 09:30",  # first candle high $11.00
+            "2026-04-16 09:31",  # closes $11.05 > trigger $11.00
+        ],
+        highs=[10.00, 11.00, 11.10],
+        lows=[9.80, 10.50, 10.80],
+        closes=[9.90, 10.80, 11.05],
+        volumes=[500, 2000, 1500],
+    )
+    strategy = GapAndGoStrategy()
+    signal = strategy.evaluate("TEST", bars)
+    assert signal is not None
+    assert signal.entry == pytest.approx(11.05)

@@ -215,20 +215,35 @@ class GapAndGoStrategy(Strategy):
                     extension_ratio=check.extension_ratio,
                 )
 
-        # PMH trigger: gap-and-go fires when the close breaks the premarket
-        # high — a fixed resistance level from before the RTH open. A wick
-        # above PMH that closes back below (RMAX 2026-04-27 pattern) is
-        # correctly rejected because the close test fails. When no premarket
-        # bars are present the check is permissive rather than blocking.
+        # Two-mode entry trigger — Ross Cameron Gap-and-Go:
+        # · First RTH bar (09:30): trigger = PMH only.
+        #   Scenario B — stock opens below PMH; the buy-stop fires when PMH
+        #   is crossed within the first minute. The first candle's own high
+        #   is not yet a completed reference level.
+        # · Subsequent bars: trigger = max(PMH, first_candle_high).
+        #   Scenario A — stock opens above PMH; the opening range high is the
+        #   resistance to beat, not just PMH.
+        #   Scenario B — first_candle_high ≤ PMH so max() resolves to PMH.
+        # A wick above the trigger that closes below it (RMAX pattern) is
+        # correctly rejected because the close test fails. Permissive when
+        # neither level is available (mid-session subscription).
         pmh = premarket_high(bars)
-        if pmh is not None and last_close <= pmh:
+        first_rth_high = _first_rth_bar_high(bars)
+        if _is_first_rth_bar(bars):
+            trigger = pmh
+        else:
+            candidates = [v for v in (pmh, first_rth_high) if v is not None]
+            trigger = max(candidates) if candidates else None
+        if trigger is not None and last_close <= trigger:
             return self._reject(
                 symbol,
                 last_ts,
                 "entry_trigger",
-                "not_above_pmh",
+                "not_above_trigger",
                 last_close=last_close,
                 premarket_high=pmh,
+                first_rth_bar_high=first_rth_high,
+                trigger_level=trigger,
             )
 
         # Phase 7.1: restrict stop reference to market-hours bars (>= 09:30 ET on
@@ -417,6 +432,34 @@ def _prior_bar_close(bars: pd.DataFrame) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _first_rth_bar_high(bars: pd.DataFrame) -> float | None:
+    """High of the first RTH (09:30 ET) bar on the session date, or None if absent."""
+    if bars.empty or "high" not in bars.columns:
+        return None
+    index = cast("pd.DatetimeIndex", bars.index)
+    if not isinstance(index, pd.DatetimeIndex):
+        return None
+    local = index.tz_convert("America/New_York") if index.tz is not None else index
+    last_date = local[-1].date()
+    mask = (local.date == last_date) & (local.time >= _WINDOW_START)
+    if not mask.any():
+        return None
+    return float(bars.loc[mask, "high"].iloc[0])
+
+
+def _is_first_rth_bar(bars: pd.DataFrame) -> bool:
+    """True when the latest bar is the first (and only) RTH bar on its session date."""
+    if bars.empty:
+        return False
+    index = cast("pd.DatetimeIndex", bars.index)
+    if not isinstance(index, pd.DatetimeIndex):
+        return False
+    local = index.tz_convert("America/New_York") if index.tz is not None else index
+    last_date = local[-1].date()
+    rth_count = int(((local.date == last_date) & (local.time >= _WINDOW_START)).sum())
+    return rth_count <= 1
 
 
 def _apply_entry_quality_gates(
