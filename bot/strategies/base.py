@@ -178,6 +178,13 @@ class Signal:
     # recent fully-quoted price before the candidate breakout bar).
     # ``None`` falls back to the legacy entry-only ceiling.
     market_anchor_price: float | None = None
+    # Standing-order override: when set, the executor uses this order type
+    # regardless of ``execution.entry_order_type`` in config. Gap-and-go
+    # sets this to ``"STP_LMT"`` for first-bar standing orders placed before
+    # price breaks the trigger — the resting buy-stop sits on IBKR's servers
+    # until the trigger is hit or the strategy window closes. ``None`` falls
+    # back to the configured ``entry_order_type``.
+    preferred_order_type: str | None = None
 
     @property
     def risk_per_share(self) -> float:

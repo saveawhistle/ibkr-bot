@@ -229,12 +229,23 @@ class GapAndGoStrategy(Strategy):
         # neither level is available (mid-session subscription).
         pmh = premarket_high(bars)
         first_rth_high = _first_rth_bar_high(bars)
-        if _is_first_rth_bar(bars):
+        is_first_bar = _is_first_rth_bar(bars)
+        if is_first_bar:
             trigger = pmh
         else:
             candidates = [v for v in (pmh, first_rth_high) if v is not None]
             trigger = max(candidates) if candidates else None
-        if trigger is not None and last_close <= trigger:
+
+        # Standing STP_LMT path: on the first RTH bar, if price hasn't broken
+        # the trigger yet, place a resting buy-stop at the trigger rather than
+        # rejecting. IBKR holds the order on its servers and fills intrabar
+        # when price crosses the level during 09:31 – window_end. Entry is
+        # anchored at the trigger (PMH); stop is the first candle's low.
+        # On subsequent bars and when the first bar already closed above the
+        # trigger, we fall through to the normal stop-calculation path below.
+        standing_order = is_first_bar and trigger is not None and last_close <= trigger
+
+        if not standing_order and trigger is not None and last_close <= trigger:
             return self._reject(
                 symbol,
                 last_ts,
@@ -246,28 +257,46 @@ class GapAndGoStrategy(Strategy):
                 trigger_level=trigger,
             )
 
-        # Phase 7.1: restrict stop reference to market-hours bars (>= 09:30 ET on
-        # the bar's local date). IBKR backfills premarket bars with the same
-        # calendar date, so the previous same-date filter leaked overnight wicks
-        # into the pullback reference; a 1 AM $7.87 print polluted TZOO's stop
-        # across the entire session on Day 4. `last_ts` is tz-aware NY-local.
-        last_date = last_ts.date()
-        index = cast("pd.DatetimeIndex", bars.index)
-        market_open = pd.Timestamp(datetime.combine(last_date, time(9, 30)))
-        if index.tz is not None:
-            market_open = market_open.tz_localize(index.tz)
-        session = bars.loc[bars.index >= market_open]
-        if session.empty:
-            return self._reject(symbol, last_ts, "stop_calculation", "no_market_hours_bars")
-        # Phase 7.1: pullback reference is the recent N-bar minimum, not the
-        # session minimum — session-min accumulated the worst wick of the day
-        # and permanently widened the stop. If fewer than N bars are available
-        # (e.g. 9:31 evaluation with 1 completed bar), use whatever we have.
-        recent_bars = session.iloc[-PULLBACK_LOOKBACK_BARS:]
-        bars_available_for_lookback = len(recent_bars)
-        pullback_low = float(recent_bars["low"].min())
-        stop = float(min(last_vwap, pullback_low))
-        entry = last_close
+        # ---- Entry / stop determination ----
+        # Standing order: entry = trigger (STP_LMT trigger level), stop = first
+        # candle low. Normal order: entry = bar close, stop = min(VWAP, pullback).
+        pullback_low: float
+        bars_available_for_lookback: int
+        pullback_lookback_bars_used: int
+
+        if standing_order:
+            assert trigger is not None  # guarded by standing_order condition
+            entry = trigger
+            first_candle_low = float(bars["low"].iloc[-1])
+            stop = first_candle_low
+            pullback_low = first_candle_low
+            pullback_lookback_bars_used = 1
+            bars_available_for_lookback = 1
+        else:
+            entry = last_close
+            # Phase 7.1: restrict stop reference to market-hours bars (>= 09:30 ET
+            # on the bar's local date). IBKR backfills premarket bars with the same
+            # calendar date, so the previous same-date filter leaked overnight wicks
+            # into the pullback reference; a 1 AM $7.87 print polluted TZOO's stop
+            # across the entire session on Day 4. `last_ts` is tz-aware NY-local.
+            last_date = last_ts.date()
+            index = cast("pd.DatetimeIndex", bars.index)
+            market_open = pd.Timestamp(datetime.combine(last_date, time(9, 30)))
+            if index.tz is not None:
+                market_open = market_open.tz_localize(index.tz)
+            session = bars.loc[bars.index >= market_open]
+            if session.empty:
+                return self._reject(symbol, last_ts, "stop_calculation", "no_market_hours_bars")
+            # Phase 7.1: pullback reference is the recent N-bar minimum, not the
+            # session minimum — session-min accumulated the worst wick of the day
+            # and permanently widened the stop. If fewer than N bars are available
+            # (e.g. 9:31 evaluation with 1 completed bar), use whatever we have.
+            recent_bars = session.iloc[-PULLBACK_LOOKBACK_BARS:]
+            bars_available_for_lookback = len(recent_bars)
+            pullback_lookback_bars_used = PULLBACK_LOOKBACK_BARS
+            pullback_low = float(recent_bars["low"].min())
+            stop = float(min(last_vwap, pullback_low))
+
         risk = entry - stop
         if risk <= 0:
             return self._reject(
@@ -278,7 +307,7 @@ class GapAndGoStrategy(Strategy):
                 entry=entry,
                 stop=stop,
                 pullback_low=pullback_low,
-                pullback_lookback_bars=PULLBACK_LOOKBACK_BARS,
+                pullback_lookback_bars=pullback_lookback_bars_used,
                 bars_available_for_lookback=bars_available_for_lookback,
                 vwap_at_entry=last_vwap,
             )
@@ -308,6 +337,8 @@ class GapAndGoStrategy(Strategy):
         )
 
         reasons = ["vwap_hold", "above_pmh"]
+        if standing_order:
+            reasons.append("standing_stp_lmt")
         if scale_out_cap_reason == "premarket_high":
             reasons.append("scale_out_capped_premarket_high")
             _log.info(
@@ -360,9 +391,10 @@ class GapAndGoStrategy(Strategy):
             entry=entry,
             stop=stop,
             pullback_low=pullback_low,
-            pullback_lookback_bars=PULLBACK_LOOKBACK_BARS,
+            pullback_lookback_bars=pullback_lookback_bars_used,
             bars_available_for_lookback=bars_available_for_lookback,
             vwap_at_entry=last_vwap,
+            standing_order=standing_order,
         )
         return Signal(
             symbol=symbol,
@@ -375,7 +407,7 @@ class GapAndGoStrategy(Strategy):
             reasons=reasons,
             recent_bar_volume=_recent_volume(bars),
             pullback_low=pullback_low,
-            pullback_lookback_bars=PULLBACK_LOOKBACK_BARS,
+            pullback_lookback_bars=pullback_lookback_bars_used,
             bars_available_for_lookback=bars_available_for_lookback,
             vwap_at_entry=last_vwap,
             # Phase 12.5: prior bar close is the most recent fully-quoted
@@ -383,6 +415,9 @@ class GapAndGoStrategy(Strategy):
             # ceiling anchors on ``min(entry, this)`` to avoid Error 202
             # on bars where the breakout close sits well above market.
             market_anchor_price=_prior_bar_close(bars),
+            # Standing STP_LMT order: executor places a resting buy-stop at
+            # the trigger level regardless of the global entry_order_type.
+            preferred_order_type="STP_LMT" if standing_order else None,
         )
 
     def _minutes_since_open(self, ts: pd.Timestamp) -> int:

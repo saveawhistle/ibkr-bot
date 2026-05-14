@@ -32,6 +32,7 @@ import contextlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
@@ -82,6 +83,10 @@ _IBKR_UNSET_FLOAT_SENTINEL = 1.7976931348623157e308
 # or ``"GTC"`` (e.g. an end-of-day rebalancing stop), set it locally on
 # that order rather than threading a config knob through every site.
 _DEFAULT_ORDER_TIF = "DAY"
+
+# Used by ``expire_unfilled_entry`` to compare bar timestamps against the
+# gap-and-go window_end (specified in ET regardless of the bar's own tz).
+_NY_TZ = ZoneInfo("America/New_York")
 
 
 def apply_default_tif(order: Order) -> Order:
@@ -510,7 +515,10 @@ class Executor:
             round(signal.entry + initial_risk * runner_multiple, 4) if runner_enabled else None
         )
 
-        entry_order_type = self._settings.execution.entry_order_type
+        # Prefer the signal's own order-type override (e.g. gap-and-go standing
+        # STP_LMT order placed before price breaks the trigger) over the global
+        # config default. ``None`` falls back to ``execution.entry_order_type``.
+        entry_order_type = signal.preferred_order_type or self._settings.execution.entry_order_type
 
         if entry_order_type == "LMT":
             # Phase 4i path — atomic 2/3-leg bracket placed in one shot.
@@ -579,7 +587,12 @@ class Executor:
             # can auto-convert OCA children when the parent converts,
             # and atomic placement with children attached can race the
             # trigger tick.
-            parent_order = self._build_parent_entry_order(signal=signal, shares=shares)
+            # Pass the resolved ``entry_order_type`` explicitly so the builder
+            # uses STP_LMT even when the global config says ``LMT`` (e.g.
+            # gap-and-go standing orders with ``signal.preferred_order_type``).
+            parent_order = self._build_parent_entry_order(
+                signal=signal, shares=shares, order_type=entry_order_type
+            )
             parent_trade = self._ibkr.ib.placeOrder(contract, parent_order)
             bracket = _BracketTrades(parent=parent_trade, stop=None, target=None)
             open_status = "pending_entry_trigger"
@@ -764,9 +777,15 @@ class Executor:
 
         1. The position is still ``pending_entry`` or ``pending_entry_trigger``.
         2. ``placement_bar_ts`` is recorded (skips legacy/reconciled rows).
-        3. ``current_bar_ts > placement_bar_ts`` — strict inequality. The
-           same-bar evaluation must not cancel; only T+1's close onward.
-        4. The parent has zero filled shares. Any partial fill exempts the
+        3. Normal path (LMT/MKT): ``current_bar_ts > placement_bar_ts`` —
+           strict inequality. The same-bar evaluation must not cancel; only
+           T+1's close onward.
+        4. Standing STP_LMT path (gap-and-go strategy): the order sits resting
+           until the gap-and-go window closes at 10:00 ET rather than
+           expiring after just one bar. The order is cancelled when
+           ``current_bar_ts.time() >= gap_and_go.window_end``. The
+           session-end auto-flatten handles any orders that survive to 15:55.
+        5. The parent has zero filled shares. Any partial fill exempts the
            order — partial positions are valid under existing risk
            management and ``status == 'open'`` would already exclude them,
            but we re-check the trade fills as belt-and-suspenders against
@@ -789,7 +808,27 @@ class Executor:
             return False
         if position.placement_bar_ts is None:
             return False
-        if current_bar_ts <= position.placement_bar_ts:
+
+        # Standing STP_LMT gap-and-go orders live until the strategy window
+        # closes (default 10:00 ET), not just one bar. Always protect the same
+        # bar (same-bar call must never cancel) then check the window clock.
+        # ``current_bar_ts`` may be UTC or NY-local; we convert to NY for
+        # comparison with ``window_end`` which is specified in ET.
+        if position.entry_order_type == "STP_LMT" and position.strategy == "gap_and_go":
+            if current_bar_ts <= position.placement_bar_ts:
+                return False  # same-bar protection (matches non-STP_LMT behaviour)
+            gng_window_end = self._settings.strategies.gap_and_go.window_end
+            h, m = int(gng_window_end.split(":")[0]), int(gng_window_end.split(":")[1])
+            window_minutes = h * 60 + m
+            if current_bar_ts.tzinfo is not None:
+                ny_ts = current_bar_ts.astimezone(_NY_TZ)
+            else:
+                ny_ts = current_bar_ts  # assume caller already localised
+            bar_minutes = ny_ts.hour * 60 + ny_ts.minute
+            if bar_minutes < window_minutes:
+                return False  # still within the gap-and-go window, keep alive
+            # At or past window_end — fall through to cancel below.
+        elif current_bar_ts <= position.placement_bar_ts:
             return False
 
         bracket = self._active_trades.get(symbol)
@@ -1252,13 +1291,20 @@ class Executor:
                     closed_at=_now_utc(),
                 )
 
-    def _build_parent_entry_order(self, *, signal: Signal, shares: int) -> Order:
+    def _build_parent_entry_order(
+        self, *, signal: Signal, shares: int, order_type: str | None = None
+    ) -> Order:
         """Phase 4j — build the parent entry order per ``execution.entry_order_type``.
 
         ``LMT`` returns a plain marketable-limit BUY at ``signal.entry``.
         ``STP_LMT`` returns a BUY stop-limit with ``stopPrice = signal.entry``
         (trigger) and ``lmtPrice = signal.entry + entry_limit_buffer_usd``
         (ceiling).
+
+        ``order_type`` overrides the global config when the caller has already
+        resolved the effective order type (e.g. ``handle_signal`` after applying
+        ``signal.preferred_order_type``). ``None`` falls back to the configured
+        ``execution.entry_order_type``.
 
         Phase 10.3: TIF is applied uniformly at the end via
         ``apply_default_tif`` so all three entry types ship with TIF=DAY
@@ -1268,7 +1314,7 @@ class Executor:
         cancel/resubmit cycle on entry.
         """
         rth_only = self._settings.execution.rth_only
-        entry_type = self._settings.execution.entry_order_type
+        entry_type = order_type or self._settings.execution.entry_order_type
         # Phase 6.9: round to US-equity tick size. IBKR rejects sub-penny
         # prices on stocks >= $1.00 with Error 110. Applied on both the
         # LMT and the STP-LMT paths (trigger + limit).

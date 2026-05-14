@@ -740,3 +740,120 @@ def test_scenario_a_entry_fires_when_close_exceeds_first_candle_high() -> None:
     signal = strategy.evaluate("TEST", bars)
     assert signal is not None
     assert signal.entry == pytest.approx(11.05)
+
+
+# ---------- Standing STP_LMT order (Option 1 intrabar entry) ----------
+#
+# Fixture design notes:
+# * ``vwap()`` in indicators.py computes VWAP dynamically from high/low/close/volume;
+#   it ignores the ``vwap`` column set by ``_frame()``.
+# * ``check_halt_detection`` rejects if the gap between consecutive bars exceeds
+#   max_bar_gap_minutes (default 5). Use consecutive 1-min bars to stay ≤1 min.
+# * All fixtures use ``recent_rvol_min=0.0`` to isolate the standing-order path.
+
+
+def test_standing_order_emitted_when_first_bar_closes_below_pmh() -> None:
+    """First RTH bar closes above VWAP but below PMH → standing STP_LMT signal.
+
+    Fixture: gap-up stock with two adjacent premarket bars (PMH=$10.50 from the
+    09:28 bar), then a 09:30 bar that closes $10.40 — still below PMH but above
+    the dynamically-computed session VWAP (~$10.27).
+
+    Expected: signal.entry == PMH, stop == first-candle low, preferred_order_type
+    == "STP_LMT", "standing_stp_lmt" in reasons.
+    """
+    bars = _frame(
+        times=[
+            "2026-04-16 09:28",  # premarket — PMH = $10.50 (high)
+            "2026-04-16 09:29",  # premarket — 1 min before open, no new PMH
+            "2026-04-16 09:30",  # first RTH bar: close $10.40 < PMH $10.50
+        ],
+        highs=[10.50, 10.10, 10.45],
+        lows=[9.80, 9.90, 10.05],
+        closes=[9.90, 10.00, 10.40],
+        volumes=[200, 200, 3000],
+    )
+    # Computed VWAP ≈ (10.067×200 + 10.0×200 + 10.3×3000) / 3400 ≈ 10.268
+    # close 10.40 > VWAP ✓, PMH 10.50 > close 10.40 ✓, gap 09:29→09:30 = 1 min ✓
+    strategy = GapAndGoStrategy(recent_rvol_min=0.0)
+    signal = strategy.evaluate("TEST", bars)
+    assert signal is not None, "standing signal should be emitted"
+    assert signal.preferred_order_type == "STP_LMT"
+    assert signal.entry == pytest.approx(10.50)   # PMH trigger, not bar close
+    assert signal.stop == pytest.approx(10.05)    # first candle low
+    assert signal.stop < signal.entry
+    assert "standing_stp_lmt" in signal.reasons
+    assert signal.pullback_lookback_bars == 1
+    assert signal.bars_available_for_lookback == 1
+
+
+def test_standing_order_stop_is_first_candle_low_not_vwap() -> None:
+    """Stop for a standing order is the first candle low, not min(VWAP, pullback)."""
+    bars = _frame(
+        times=[
+            "2026-04-16 09:28",  # premarket — PMH = $12.00 (high)
+            "2026-04-16 09:29",  # premarket
+            "2026-04-16 09:30",  # first RTH bar: close $11.60 < PMH $12.00
+        ],
+        highs=[12.00, 11.50, 11.90],
+        lows=[9.80, 10.50, 11.20],
+        closes=[10.00, 11.00, 11.60],
+        volumes=[200, 200, 4000],
+    )
+    # VWAP ≈ (10.267×200 + 11.0×200 + 11.567×4000) / 4400 ≈ 11.497
+    # close 11.60 > VWAP ✓, PMH 12.00 > close 11.60 ✓, 1-min gap ✓
+    strategy = GapAndGoStrategy(recent_rvol_min=0.0)
+    signal = strategy.evaluate("TEST", bars)
+    assert signal is not None
+    assert signal.preferred_order_type == "STP_LMT"
+    assert signal.stop == pytest.approx(11.20)  # first candle low, not VWAP
+
+
+def test_standing_order_not_emitted_when_first_bar_already_above_trigger() -> None:
+    """First RTH bar closes above PMH → normal close-based LMT path, not standing."""
+    bars = _frame(
+        times=[
+            "2026-04-16 09:28",  # premarket — PMH = $10.20 (high)
+            "2026-04-16 09:29",  # premarket
+            "2026-04-16 09:30",  # first RTH bar: close $10.30 > PMH $10.20
+        ],
+        highs=[10.20, 10.10, 10.45],
+        lows=[9.80, 9.90, 10.15],
+        closes=[9.90, 10.00, 10.30],
+        volumes=[200, 200, 3000],
+    )
+    strategy = GapAndGoStrategy(recent_rvol_min=0.0)
+    signal = strategy.evaluate("TEST", bars)
+    assert signal is not None
+    assert signal.preferred_order_type is None          # normal path
+    assert signal.entry == pytest.approx(10.30)        # bar close, not PMH
+
+
+def test_subsequent_bar_below_trigger_still_rejects_not_standing() -> None:
+    """Standing-order path only fires on the FIRST RTH bar.
+
+    On the 09:31 bar, close below the trigger → normal rejection, no standing.
+    """
+    bars = _frame(
+        times=[
+            "2026-04-16 09:28",  # premarket — PMH = $10.50
+            "2026-04-16 09:30",  # first RTH bar — first_candle_high $10.80
+            "2026-04-16 09:31",  # close $10.60 — above PMH, below first_candle_high
+        ],
+        highs=[10.50, 10.80, 10.75],
+        lows=[10.20, 10.30, 10.40],
+        closes=[10.30, 10.60, 10.60],
+        volumes=[500, 3000, 2000],
+    )
+    # trigger for 09:31 = max(PMH=10.50, first_candle_high=10.80) = 10.80
+    # close 10.60 < 10.80 → rejected, not a standing order
+    strategy = GapAndGoStrategy(recent_rvol_min=0.0)
+    with capture_logs() as captured:
+        signal = strategy.evaluate("TEST", bars)
+    assert signal is None
+    rejections = [
+        e for e in captured
+        if e.get("event") == "signal.rejected" and e.get("reason") == "not_above_trigger"
+    ]
+    assert len(rejections) == 1
+    assert rejections[0]["trigger_level"] == pytest.approx(10.80)
