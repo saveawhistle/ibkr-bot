@@ -8,6 +8,7 @@ import pytest
 from bot.indicators import (
     _market_hours_session_key,
     _session_key,
+    analyze_momentum_pattern,
     atr,
     ema,
     evaluate_hod,
@@ -589,3 +590,139 @@ def test_premarket_high_only_considers_latest_session_date() -> None:
         volumes=[100, 100, 100],
     )
     assert premarket_high(bars) == pytest.approx(1.50)
+
+
+# ---------- Phase 14: analyze_momentum_pattern ---------- #
+
+
+def _momentum_bars(
+    *,
+    impulse_closes: list[float],
+    cons_closes: list[float],
+    breakout_close: float,
+    base_price: float = 10.0,
+    spread: float = 0.05,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Build a 10-bar (3-impulse + 6-cons + 1-breakout) frame for pattern tests.
+
+    Opens equal closes (intraday convention). Highs are close + spread,
+    lows are close - spread. Volume is constant at 1 000. Returns
+    (bars, vwap_series) so callers can pass both to analyze_momentum_pattern.
+    """
+    all_closes = impulse_closes + cons_closes + [breakout_close]
+    n = len(all_closes)
+    times = [f"2026-04-16 10:{30 + i:02d}" for i in range(n)]
+    highs = [c + spread for c in all_closes]
+    lows = [c - spread for c in all_closes]
+    bars = _frame(
+        times=times,
+        opens=all_closes,
+        highs=highs,
+        lows=lows,
+        closes=all_closes,
+        volumes=[1_000.0] * n,
+    )
+    vwap_series = vwap(bars)
+    return bars, vwap_series
+
+
+def test_analyze_momentum_pattern_bull_flag() -> None:
+    """3-bar impulse + 6-bar flag with exactly 2 down bars, pullback ~44% of pole → bull_flag."""
+    # Impulse climbs 10.0 → 10.5; consolidation drops to 10.28 (2 red candles) then
+    # recovers. Total range > 2% and high range > 0.5%, so flat_top and micro_pullback
+    # priority checks pass through and bull_flag classification is reached.
+    impulse = [10.0, 10.2, 10.5]
+    cons = [10.4, 10.28, 10.32, 10.35, 10.38, 10.40]
+    bars, vwap_s = _momentum_bars(impulse_closes=impulse, cons_closes=cons, breakout_close=10.55)
+    pattern = analyze_momentum_pattern(bars, vwap_s)
+    assert pattern is not None
+    assert pattern.pattern_type == "bull_flag"
+    assert pattern.red_candle_count == 2  # 10.40 < 10.50 and 10.28 < 10.40 are down bars
+    # flag_high = 10.40+0.05=10.45; pole_low = 10.0-0.05=9.95; pullback ≈ 44% of pole.
+    assert pattern.pullback_pct_of_pole < 0.50
+    assert pattern.trigger_level == pytest.approx(10.45)  # max high of consolidation
+
+
+def test_analyze_momentum_pattern_micro_pullback() -> None:
+    """Tight consolidation range (< 2% total, > 0.5% high-range) → micro_pullback."""
+    impulse = [10.10, 10.30, 10.50]
+    # Close range = 0.06 → high range = 0.57% > 0.5% (clears flat_top threshold);
+    # total range = 0.16 → 1.5% ≤ 2.0% (satisfies micro_pullback threshold).
+    cons = [10.50, 10.44, 10.46, 10.48, 10.49, 10.50]
+    bars, vwap_s = _momentum_bars(impulse_closes=impulse, cons_closes=cons, breakout_close=10.55)
+    pattern = analyze_momentum_pattern(bars, vwap_s)
+    assert pattern is not None
+    assert pattern.pattern_type == "micro_pullback"
+
+
+def test_analyze_momentum_pattern_flat_top() -> None:
+    """Highs cluster within 0.4% of each other → flat_top (highest priority)."""
+    impulse = [10.10, 10.30, 10.50]
+    # All consolidation highs within 0.04 of each other → high_range_pct ≈ 0.4% ≤ 0.5%.
+    # Lows vary more; only highs are tested for flat_top.
+    cons = [10.48, 10.46, 10.45, 10.47, 10.48, 10.49]
+    bars, vwap_s = _momentum_bars(
+        impulse_closes=impulse,
+        cons_closes=cons,
+        breakout_close=10.55,
+        spread=0.01,  # tight spread so high_range stays small
+    )
+    pattern = analyze_momentum_pattern(bars, vwap_s, flat_top_max_high_range_pct=0.5)
+    assert pattern is not None
+    assert pattern.pattern_type == "flat_top"
+
+
+def test_analyze_momentum_pattern_deep_pullback_rejected() -> None:
+    """Pullback > 50% of pole, red count = 1 (too few) → None."""
+    impulse = [10.10, 10.30, 10.50]
+    # Consolidation drops to 10.20 — pullback 0.30/0.45 = 67% of pole.
+    # Only 1 red candle — doesn't satisfy bull_flag [2, 3] range.
+    cons = [10.40, 10.20, 10.22, 10.24, 10.25, 10.26]
+    bars, vwap_s = _momentum_bars(impulse_closes=impulse, cons_closes=cons, breakout_close=10.55)
+    pattern = analyze_momentum_pattern(bars, vwap_s)
+    assert pattern is None
+
+
+def test_analyze_momentum_pattern_vwap_hold_false() -> None:
+    """One consolidation bar closing below VWAP sets vwap_hold=False."""
+    impulse = [10.10, 10.30, 10.50]
+    cons = [10.45, 10.40, 10.41, 10.42, 10.43, 10.44]
+    bars, _ = _momentum_bars(impulse_closes=impulse, cons_closes=cons, breakout_close=10.55)
+    # Build a VWAP series where the first consolidation bar's VWAP is above its close.
+    all_ts = bars.index.tolist()
+    cons_ts = all_ts[3:9]  # indices 3-8 = consolidation
+    # Set VWAP at the first consolidation bar above the close (10.45) to force a miss.
+    vwap_s = pd.Series(10.30, index=bars.index)  # default below close
+    vwap_s[cons_ts[0]] = 10.50  # first cons bar: VWAP 10.50 > close 10.45
+    pattern = analyze_momentum_pattern(bars, vwap_s)
+    assert pattern is not None
+    assert pattern.vwap_hold is False
+
+
+def test_analyze_momentum_pattern_insufficient_bars() -> None:
+    """Fewer than impulse_window + consolidation_window + 1 = 10 bars → None."""
+    bars, vwap_s = _momentum_bars(
+        impulse_closes=[10.10, 10.30, 10.50],
+        cons_closes=[10.45, 10.40, 10.41, 10.42, 10.43],  # only 5 cons bars, need 6
+        breakout_close=10.55,
+    )
+    # Drop 2 bars so total = 9 < 10.
+    bars = bars.iloc[:-2]
+    vwap_s = vwap_s.iloc[:-2]
+    assert analyze_momentum_pattern(bars, vwap_s) is None
+
+
+def test_analyze_momentum_pattern_standing_order_mode() -> None:
+    """include_last_bar_in_consolidation=True shifts the window so the last bar is consolidation."""
+    # Tight micro-pullback consolidation (range < 2%). In breakout mode the final bar
+    # (10.55) is excluded from consolidation so trigger_level = 10.55 (max cons high).
+    # In standing-order mode the 10.55 bar is INCLUDED, so trigger_level = 10.60 (its high).
+    impulse = [10.0, 10.2, 10.5]
+    cons = [10.49, 10.49, 10.50, 10.49, 10.49, 10.49]
+    bars, vwap_s = _momentum_bars(impulse_closes=impulse, cons_closes=cons, breakout_close=10.55)
+    pattern_so = analyze_momentum_pattern(bars, vwap_s, include_last_bar_in_consolidation=True)
+    pattern_bo = analyze_momentum_pattern(bars, vwap_s, include_last_bar_in_consolidation=False)
+    assert pattern_so is not None
+    # trigger_level = max high of the 6-bar consolidation window.
+    # Standing order includes the 10.55 bar (high = 10.60); breakout mode excludes it (high = 10.55).
+    assert pattern_so.trigger_level > pattern_bo.trigger_level  # type: ignore[operator]

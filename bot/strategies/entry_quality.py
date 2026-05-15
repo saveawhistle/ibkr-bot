@@ -391,8 +391,90 @@ def check_vwap_extension(
     return "excessive_vwap_extension"
 
 
+def check_consolidation_vwap_hold(
+    *,
+    vwap_hold: bool,
+    pattern_type: str,
+    consolidation_low: float,
+    symbol: str,
+    strategy: str,
+    bar_time: datetime | pd.Timestamp,
+) -> str | None:
+    """Reject when one or more consolidation bars closed below VWAP.
+
+    Cameron's published rule: real bull flags, micro pullbacks, and flat tops
+    all consolidate *above* VWAP. A close below VWAP during the flag signals
+    buyers losing control before the breakout triggers.
+
+    ``vwap_hold`` is computed by ``analyze_momentum_pattern`` at parse time;
+    this gate wraps the bool in the canonical rejection path so it can be
+    disabled by conftest's autouse noop fixture for legacy tests.
+    """
+    if vwap_hold:
+        return None
+    _log.info(
+        "strategy.signal_rejected_vwap_not_held",
+        symbol=symbol,
+        strategy=strategy,
+        bar_time=_iso(bar_time),
+        pattern_type=pattern_type,
+        consolidation_low=round(consolidation_low, 4),
+    )
+    return "vwap_not_held_during_consolidation"
+
+
+def check_breakout_volume_ratio(
+    *,
+    bars: pd.DataFrame,
+    consolidation_window_bars: int,
+    min_ratio: float,
+    symbol: str,
+    strategy: str,
+    bar_time: datetime | pd.Timestamp,
+) -> str | None:
+    """Reject when the breakout bar's volume is weak relative to the consolidation.
+
+    Cameron's published rule: the breakout candle must show a volume surge
+    above the quiet consolidation bars, confirming that buyers are stepping
+    in at the trigger rather than the move being a low-conviction drift.
+    Computes ``breakout_vol / consolidation_avg_vol`` and rejects when the
+    ratio falls below ``min_ratio`` (default 1.5).
+
+    Insufficient-data policy:
+    * Fewer bars than needed => return None
+    * ``volume`` column absent => return None (synthetic test path)
+    * consolidation avg == 0 => return None (pathological but not an error)
+    """
+    required = consolidation_window_bars + 2
+    if len(bars) < required:
+        return None
+    if "volume" not in bars.columns:
+        return None
+    breakout_vol = float(bars["volume"].iloc[-1])
+    cons_vols = bars["volume"].iloc[-(consolidation_window_bars + 1):-1]
+    cons_avg = float(cons_vols.mean())
+    if cons_avg <= 0:
+        return None
+    ratio = breakout_vol / cons_avg
+    if ratio >= min_ratio:
+        return None
+    _log.info(
+        "strategy.signal_rejected_insufficient_breakout_volume",
+        symbol=symbol,
+        strategy=strategy,
+        bar_time=_iso(bar_time),
+        breakout_volume=round(breakout_vol, 2),
+        consolidation_avg_volume=round(cons_avg, 2),
+        ratio=round(ratio, 4),
+        min_ratio=min_ratio,
+    )
+    return "insufficient_breakout_volume"
+
+
 __all__ = [
+    "check_breakout_volume_ratio",
     "check_consolidation_tightness",
+    "check_consolidation_vwap_hold",
     "check_halt_detection",
     "check_impulse_strength",
     "check_volume_contraction",

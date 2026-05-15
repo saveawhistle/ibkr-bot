@@ -27,6 +27,7 @@ import structlog
 
 from bot.config import EntryQualityConfig
 from bot.strategies.entry_quality import (
+    check_breakout_volume_ratio,
     check_consolidation_tightness,
     check_halt_detection,
     check_impulse_strength,
@@ -686,3 +687,80 @@ def test_forensic_regression_aiio_pattern_rejects_via_vwap_extension() -> None:
         bar_time=df.index[-1],
     )
     assert result == "excessive_vwap_extension"
+
+
+# ---------- Phase 14: check_breakout_volume_ratio unit tests ---------- #
+
+
+def _volume_frame(
+    n_bars: int,
+    consolidation_vols: list[float],
+    breakout_vol: float,
+) -> pd.DataFrame:
+    """Build a minimal bar frame for volume ratio tests.
+
+    Creates ``n_bars`` total with constant price (doesn't matter for volume tests).
+    The last ``len(consolidation_vols)`` bars before the breakout bar get the
+    specified volumes; earlier bars also use 1_000. The final bar is the
+    breakout bar.
+    """
+    times = [f"2026-04-16 10:{30 + i:02d}" for i in range(n_bars)]
+    idx = pd.to_datetime(times).tz_localize("America/New_York")
+    vols = [1_000.0] * n_bars
+    for i, v in enumerate(consolidation_vols):
+        vols[n_bars - 1 - len(consolidation_vols) + i] = v
+    vols[-1] = breakout_vol
+    closes = [10.0] * n_bars
+    return pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 0.05 for c in closes],
+            "low": [c - 0.05 for c in closes],
+            "close": closes,
+            "volume": vols,
+        },
+        index=idx,
+    )
+
+
+def test_check_breakout_volume_ratio_passes() -> None:
+    """Breakout vol = 2× consolidation avg, min_ratio=1.5 → None (pass)."""
+    bars = _volume_frame(n_bars=10, consolidation_vols=[1_000.0] * 6, breakout_vol=2_000.0)
+    result = check_breakout_volume_ratio(
+        bars=bars,
+        consolidation_window_bars=6,
+        min_ratio=1.5,
+        symbol="TEST",
+        strategy="momentum",
+        bar_time=bars.index[-1],
+    )
+    assert result is None
+
+
+def test_check_breakout_volume_ratio_fails() -> None:
+    """Breakout vol = 1× consolidation avg, min_ratio=1.5 → insufficient_breakout_volume."""
+    bars = _volume_frame(n_bars=10, consolidation_vols=[1_000.0] * 6, breakout_vol=1_000.0)
+    result = check_breakout_volume_ratio(
+        bars=bars,
+        consolidation_window_bars=6,
+        min_ratio=1.5,
+        symbol="TEST",
+        strategy="momentum",
+        bar_time=bars.index[-1],
+    )
+    assert result == "insufficient_breakout_volume"
+
+
+def test_check_breakout_volume_ratio_permissive_on_missing_volume() -> None:
+    """No volume column → None (permissive on missing data)."""
+    bars = _volume_frame(n_bars=10, consolidation_vols=[1_000.0] * 6, breakout_vol=500.0)
+    bars = bars.drop(columns=["volume"])
+    result = check_breakout_volume_ratio(
+        bars=bars,
+        consolidation_window_bars=6,
+        min_ratio=1.5,
+        symbol="TEST",
+        strategy="momentum",
+        bar_time=bars.index[-1],
+    )
+    assert result is None

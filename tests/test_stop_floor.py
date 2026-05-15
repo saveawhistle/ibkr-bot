@@ -266,7 +266,10 @@ def test_momentum_no_floor_event_when_structural_already_wide_enough() -> None:
     with capture_logs() as captured:
         signal = strategy.evaluate("WIDE", bars)
     assert signal is not None
-    assert signal.stop == pytest.approx(10.00)  # structural unchanged
+    # Phase 14: stop is consolidation_low (bars 3-8 min low = 10.20), not the
+    # full 10-bar lookback low of 10.00. Risk = 10.50 - 10.20 = 0.30 still
+    # far exceeds the floor, so no floor event fires.
+    assert signal.stop == pytest.approx(10.20)  # structural unchanged (no floor)
     assert not any(e.get("event") == "entry.stop_distance_floor_applied" for e in captured)
 
 

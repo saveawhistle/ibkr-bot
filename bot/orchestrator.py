@@ -262,6 +262,13 @@ def build_default_strategies(settings: Settings | None = None) -> list[Strategy]
                 recent_rvol_min=mom_cfg.recent_rvol_min,
                 recent_rvol_window_bars=mom_cfg.recent_rvol_window_bars,
                 entry_quality=mom_cfg.entry_quality,
+                bull_flag_min_red_candles=mom_cfg.bull_flag_min_red_candles,
+                bull_flag_max_red_candles=mom_cfg.bull_flag_max_red_candles,
+                bull_flag_max_pullback_pct_of_pole=mom_cfg.bull_flag_max_pullback_pct_of_pole,
+                micro_pullback_max_range_pct=mom_cfg.micro_pullback_max_range_pct,
+                flat_top_max_high_range_pct=mom_cfg.flat_top_max_high_range_pct,
+                breakout_volume_enabled=mom_cfg.breakout_volume_enabled,
+                breakout_volume_vs_consolidation_min_ratio=mom_cfg.breakout_volume_vs_consolidation_min_ratio,
             )
         )
     return strategies

@@ -7,6 +7,7 @@ has side effects — strategies must remain side-effect-free during ``evaluate``
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import time
 from typing import Literal, NamedTuple, cast
 
@@ -51,6 +52,27 @@ class ExtensionCheck(NamedTuple):
     distance_from_vwap: float | None
     threshold_distance: float | None
     extension_ratio: float | None
+
+
+@dataclass(frozen=True)
+class MomentumPattern:
+    """Rich result of ``analyze_momentum_pattern``.
+
+    ``pattern_type`` is one of ``"bull_flag"``, ``"micro_pullback"``, or
+    ``"flat_top"``. ``trigger_level`` is the max high of the consolidation
+    window — the resistance price where a standing STP_LMT order would sit.
+    ``consolidation_low`` is the min low of the consolidation window and
+    serves as the structural stop reference (scoped to the flag/pause bars,
+    not the broader impulse). ``vwap_hold`` is ``True`` when every
+    consolidation bar's close is at or above VWAP at that bar's timestamp.
+    """
+
+    pattern_type: str
+    trigger_level: float
+    consolidation_low: float
+    red_candle_count: int
+    pullback_pct_of_pole: float
+    vwap_hold: bool
 
 
 def vwap(bars: pd.DataFrame) -> pd.Series:
@@ -199,6 +221,113 @@ def is_bull_flag(bars: pd.DataFrame, max_pullback_pct: float = 5.0, lookback: in
     trough = float(consolidation["close"].min())
     pullback_pct = (impulse_high - trough) / impulse_high * 100.0
     return 0.0 <= pullback_pct <= max_pullback_pct
+
+
+def analyze_momentum_pattern(
+    bars: pd.DataFrame,
+    vwap_series: pd.Series,
+    *,
+    impulse_window_bars: int = 3,
+    consolidation_window_bars: int = 6,
+    include_last_bar_in_consolidation: bool = False,
+    bull_flag_min_red_candles: int = 2,
+    bull_flag_max_red_candles: int = 3,
+    bull_flag_max_pullback_pct_of_pole: float = 0.50,
+    micro_pullback_max_range_pct: float = 2.0,
+    flat_top_max_high_range_pct: float = 0.5,
+) -> MomentumPattern | None:
+    """Detect Bull Flag, Micro Pullback, or Flat Top consolidation pattern.
+
+    Segments the bar history into an impulse leg and a consolidation window
+    (parameterised by ``impulse_window_bars`` / ``consolidation_window_bars``).
+    Returns ``None`` when insufficient bars are available or when no pattern
+    matches the consolidation.
+
+    When ``include_last_bar_in_consolidation=False`` (breakout path, default):
+      * consolidation = ``bars.iloc[-(cons+1):-1]``  (trigger bar excluded)
+      * impulse       = ``bars.iloc[-(imp+cons+1):-(cons+1)]``
+
+    When ``include_last_bar_in_consolidation=True`` (standing-order path, the
+    current bar is still part of the flag):
+      * consolidation = ``bars.iloc[-cons:]``
+      * impulse       = ``bars.iloc[-(imp+cons):-cons]``
+
+    Pattern priority (first match wins):
+      1. **flat_top**      — highs of consolidation cluster within ``flat_top_max_high_range_pct``
+      2. **micro_pullback** — total range (high-to-low) within ``micro_pullback_max_range_pct``
+      3. **bull_flag**     — ``[min, max]`` red candles AND pullback < ``bull_flag_max_pullback_pct_of_pole`` of pole
+
+    VWAP hold: ``MomentumPattern.vwap_hold`` is ``True`` when every consolidation
+    bar's close is >= its VWAP value. Permissive on missing VWAP data (treats
+    missing bars as held) so synthetic test frames without full VWAP history
+    don't auto-reject.
+    """
+    required = impulse_window_bars + consolidation_window_bars + 1
+    if len(bars) < required:
+        return None
+
+    if include_last_bar_in_consolidation:
+        consolidation = bars.iloc[-consolidation_window_bars:]
+        impulse = bars.iloc[-(impulse_window_bars + consolidation_window_bars):-consolidation_window_bars]
+    else:
+        consolidation = bars.iloc[-(consolidation_window_bars + 1):-1]
+        impulse = bars.iloc[-(impulse_window_bars + consolidation_window_bars + 1):-(consolidation_window_bars + 1)]
+
+    if consolidation.empty or impulse.empty:
+        return None
+
+    flag_high = float(consolidation["high"].max())
+    flag_low = float(consolidation["low"].min())
+    if flag_high <= 0:
+        return None
+
+    pole_low = float(impulse["low"].min())
+    pole_height = flag_high - pole_low
+    if pole_height <= 0:
+        return None
+    pullback_depth = flag_high - flag_low
+    pullback_pct_of_pole = pullback_depth / pole_height
+
+    # Count bars where close < the prior bar's close (down bars in the session).
+    # Using prior close rather than bar open because 1-minute bar opens typically
+    # equal the prior close intraday; close < prior_close cleanly identifies a
+    # descending bar regardless of how the fixture or feed populates the open field.
+    prior_closes = bars["close"].shift(1)
+    red_candle_count = int(
+        (consolidation["close"] < prior_closes.loc[consolidation.index]).sum()
+    )
+    high_range_pct = (float(consolidation["high"].max()) - float(consolidation["high"].min())) / flag_high * 100.0
+    total_range_pct = pullback_depth / flag_high * 100.0
+
+    # VWAP hold: check each consolidation bar's close against its VWAP value.
+    vwap_hold = True
+    if not vwap_series.empty:
+        for ts in consolidation.index:
+            if ts in vwap_series.index:
+                bar_close = float(consolidation.loc[ts, "close"])
+                bar_vwap = float(vwap_series.loc[ts])
+                if bar_close < bar_vwap:
+                    vwap_hold = False
+                    break
+
+    # Pattern classification — first match wins.
+    if high_range_pct <= flat_top_max_high_range_pct:
+        pattern_type = "flat_top"
+    elif total_range_pct <= micro_pullback_max_range_pct:
+        pattern_type = "micro_pullback"
+    elif bull_flag_min_red_candles <= red_candle_count <= bull_flag_max_red_candles and pullback_pct_of_pole <= bull_flag_max_pullback_pct_of_pole:
+        pattern_type = "bull_flag"
+    else:
+        return None
+
+    return MomentumPattern(
+        pattern_type=pattern_type,
+        trigger_level=flag_high,
+        consolidation_low=flag_low,
+        red_candle_count=red_candle_count,
+        pullback_pct_of_pole=round(pullback_pct_of_pole, 4),
+        vwap_hold=vwap_hold,
+    )
 
 
 def evaluate_extension(
