@@ -184,6 +184,14 @@ strategies:
       halt_detection_enabled: true
       max_bar_gap_minutes: 5.0
       halt_detection_rth_only: true
+    # Phase 14 — three-pattern detection (Bull Flag, Micro Pullback, Flat Top)
+    bull_flag_min_red_candles: 2
+    bull_flag_max_red_candles: 3
+    bull_flag_max_pullback_pct_of_pole: 0.50
+    micro_pullback_max_range_pct: 2.0
+    flat_top_max_high_range_pct: 0.5
+    breakout_volume_enabled: true
+    breakout_volume_vs_consolidation_min_ratio: 1.5
 
 ibkr:
   host: 127.0.0.1

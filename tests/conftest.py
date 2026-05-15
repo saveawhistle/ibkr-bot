@@ -120,6 +120,8 @@ def _disable_entry_quality_gates_by_default(
     monkeypatch.setattr("bot.strategies.momentum.check_consolidation_tightness", _noop)
     monkeypatch.setattr("bot.strategies.momentum.check_volume_contraction", _noop)
     monkeypatch.setattr("bot.strategies.momentum.check_vwap_extension", _noop)
+    monkeypatch.setattr("bot.strategies.momentum.check_consolidation_vwap_hold", _noop)
+    monkeypatch.setattr("bot.strategies.momentum.check_breakout_volume_ratio", _noop)
 
 
 def pytest_configure(config: pytest.Config) -> None:

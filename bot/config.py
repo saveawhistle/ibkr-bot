@@ -896,6 +896,19 @@ class MomentumConfig(BaseModel):
     recent_rvol_window_bars: int = 20
     # Phase 13 — entry-quality gates (per-strategy). See EntryQualityConfig.
     entry_quality: EntryQualityConfig = Field(default_factory=EntryQualityConfig)
+    # Phase 14 — three-pattern detection (Bull Flag, Micro Pullback, Flat Top).
+    # Bull Flag: 2-3 descending red candles, pullback < 50% of the impulse pole.
+    bull_flag_min_red_candles: int = 2
+    bull_flag_max_red_candles: int = 3
+    bull_flag_max_pullback_pct_of_pole: float = 0.50
+    # Micro Pullback: total consolidation range (high-to-low) very tight.
+    micro_pullback_max_range_pct: float = 2.0
+    # Flat Top: highs of consolidation bars cluster within a tight band.
+    flat_top_max_high_range_pct: float = 0.5
+    # Breakout volume gate: breakout bar must show a surge vs. consolidation avg.
+    # Only applied in the breakout path (not standing-order path).
+    breakout_volume_enabled: bool = True
+    breakout_volume_vs_consolidation_min_ratio: float = 1.5
 
     @field_validator("extended_from_vwap_atr_multiple")
     @classmethod
